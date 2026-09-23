@@ -57,22 +57,23 @@ async function runTests() {
 
   // 2. Test Auth Register & Login with username
   console.log('--- Test 2: Inscription et Connexion REST API (username) ---');
+  const testUsername = `DriverTana_${Date.now().toString(36)}`;
   const regRes = await makeHttpRequest('/api/register', 'POST', {
-    username: 'DriverTana',
+    username: testUsername,
     password: 'superpassword123',
   });
   console.log('Register Res:', regRes);
   assert.strictEqual(regRes.status, 201);
-  assert.strictEqual(regRes.body.user.username, 'DriverTana');
+  assert.strictEqual(regRes.body.user.username, testUsername);
   assert.ok(regRes.body.token);
 
   const loginRes = await makeHttpRequest('/api/login', 'POST', {
-    username: 'DriverTana',
+    username: testUsername,
     password: 'superpassword123',
   });
   console.log('Login Res:', loginRes);
   assert.strictEqual(loginRes.status, 200);
-  assert.strictEqual(loginRes.body.user.username, 'DriverTana');
+  assert.strictEqual(loginRes.body.user.username, testUsername);
   assert.ok(loginRes.body.token);
   console.log('✅ Test 2 Réussi !');
 
