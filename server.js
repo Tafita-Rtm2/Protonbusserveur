@@ -17,6 +17,7 @@ const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { Server } = require('socket.io');
+const { loadUsers, saveUsers } = require('./db');
 
 // ------------------------------------------------------------------
 // Configuration générale
@@ -29,16 +30,17 @@ const MIN_TICK_INTERVAL_MS = 1000 / TICK_RATE; // ~33.33ms
 const DEFAULT_MAX_PLAYERS = 10;
 
 // ------------------------------------------------------------------
-// "Base de données" en mémoire
+// Base de données locale autonome (JSON)
 // ------------------------------------------------------------------
 
-/** @type {Map<string, {id:string, pseudo:string, passwordHash:string, createdAt:number}>} */
-const users = new Map(); // clé = pseudo (insensible à la casse via pseudoKey)
+/** @type {Map<string, {id:string, username:string, pseudo:string, passwordHash:string, createdAt:number}>} */
+const users = loadUsers(); // charge au démarrage
 
 /**
  * @typedef {Object} Room
  * @property {string} id
  * @property {string} name
+ * @property {boolean} isPrivate
  * @property {string|null} passwordHash
  * @property {string} mapId
  * @property {string} busId
@@ -51,6 +53,8 @@ const users = new Map(); // clé = pseudo (insensible à la casse via pseudoKey)
 /**
  * @typedef {Object} Player
  * @property {string} socketId
+ * @property {string} userId
+ * @property {string} username
  * @property {string} pseudo
  * @property {Object} transform  dernière position/rotation connue
  * @property {number} lastUpdateTs  horodatage du dernier broadcast (throttle 30Hz)
@@ -59,8 +63,8 @@ const users = new Map(); // clé = pseudo (insensible à la casse via pseudoKey)
 /** @type {Map<string, Room>} */
 const rooms = new Map();
 
-function pseudoKey(pseudo) {
-  return String(pseudo || '').trim().toLowerCase();
+function userKey(name) {
+  return String(name || '').trim().toLowerCase();
 }
 
 function genId(prefix = 'id') {
@@ -71,15 +75,21 @@ function genId(prefix = 'id') {
 // Vue publique d'une room (jamais exposer passwordHash)
 // ------------------------------------------------------------------
 function publicRoom(room) {
+  const hostPlayer = room.players.get(room.hostId);
+  const hostUsername = hostPlayer ? (hostPlayer.username || hostPlayer.pseudo) : '';
   return {
     id: room.id,
     name: room.name,
+    roomName: room.name,
+    isPrivate: room.isPrivate || !!room.passwordHash,
     hasPassword: !!room.passwordHash,
     mapId: room.mapId,
     busId: room.busId,
     maxPlayers: room.maxPlayers,
     playerCount: room.players.size,
-    players: Array.from(room.players.values()).map((p) => p.pseudo),
+    hostId: room.hostId,
+    hostUsername: hostUsername,
+    players: Array.from(room.players.values()).map((p) => p.username || p.pseudo),
     createdAt: room.createdAt,
   };
 }
@@ -94,6 +104,15 @@ function publicRoomList() {
 const app = express();
 app.use(cors({ origin: '*' }));
 app.use(express.json());
+
+// Middleware de gestion des erreurs de syntaxe JSON (ex: payload texte brut invalide)
+app.use((err, req, res, next) => {
+  if (err instanceof SyntaxError && err.status === 400 && 'body' in err) {
+    return res.status(400).json({ error: 'Format JSON invalide' });
+  }
+  next(err);
+});
+
 app.use(express.static(path.join(__dirname, 'public')));
 
 const server = http.createServer(app);
@@ -126,42 +145,46 @@ function authMiddleware(req, res, next) {
 // Routes REST : Authentification
 // ------------------------------------------------------------------
 
-// POST /api/register  { pseudo, password }
+// POST /api/register  { username, pseudo, password }
 app.post('/api/register', async (req, res) => {
   try {
-    const { pseudo, password } = req.body || {};
-    if (!pseudo || !password) {
-      return res.status(400).json({ error: 'Pseudo et mot de passe requis.' });
+    const { username, pseudo, password } = req.body || {};
+    const finalUsername = String(username || pseudo || '').trim();
+
+    if (!finalUsername || !password) {
+      return res.status(400).json({ error: 'Nom d\'utilisateur (username) et mot de passe requis.' });
     }
-    if (String(pseudo).trim().length < 3) {
-      return res.status(400).json({ error: 'Le pseudo doit contenir au moins 3 caractères.' });
+    if (finalUsername.length < 3) {
+      return res.status(400).json({ error: 'Le nom d\'utilisateur doit contenir au moins 3 caractères.' });
     }
     if (String(password).length < 4) {
       return res.status(400).json({ error: 'Le mot de passe doit contenir au moins 4 caractères.' });
     }
 
-    const key = pseudoKey(pseudo);
+    const key = userKey(finalUsername);
     if (users.has(key)) {
-      return res.status(409).json({ error: 'Ce pseudo est déjà utilisé.' });
+      return res.status(409).json({ error: 'Ce nom d\'utilisateur est déjà utilisé.' });
     }
 
     const passwordHash = await bcrypt.hash(password, 10);
     const user = {
       id: genId('user'),
-      pseudo: String(pseudo).trim(),
+      username: finalUsername,
+      pseudo: finalUsername,
       passwordHash,
       createdAt: Date.now(),
     };
     users.set(key, user);
+    saveUsers(users);
 
-    const token = jwt.sign({ id: user.id, pseudo: user.pseudo }, JWT_SECRET, {
+    const token = jwt.sign({ id: user.id, username: user.username, pseudo: user.pseudo }, JWT_SECRET, {
       expiresIn: JWT_EXPIRES_IN,
     });
 
     return res.status(201).json({
       message: 'Compte créé avec succès.',
       token,
-      user: { id: user.id, pseudo: user.pseudo },
+      user: { id: user.id, username: user.username, pseudo: user.pseudo },
     });
   } catch (err) {
     console.error('[register] erreur:', err);
@@ -169,33 +192,35 @@ app.post('/api/register', async (req, res) => {
   }
 });
 
-// POST /api/login  { pseudo, password }
+// POST /api/login  { username, pseudo, password }
 app.post('/api/login', async (req, res) => {
   try {
-    const { pseudo, password } = req.body || {};
-    if (!pseudo || !password) {
-      return res.status(400).json({ error: 'Pseudo et mot de passe requis.' });
+    const { username, pseudo, password } = req.body || {};
+    const finalUsername = String(username || pseudo || '').trim();
+
+    if (!finalUsername || !password) {
+      return res.status(400).json({ error: 'Nom d\'utilisateur (username) et mot de passe requis.' });
     }
 
-    const key = pseudoKey(pseudo);
+    const key = userKey(finalUsername);
     const user = users.get(key);
     if (!user) {
-      return res.status(401).json({ error: 'Pseudo ou mot de passe incorrect.' });
+      return res.status(401).json({ error: 'Nom d\'utilisateur ou mot de passe incorrect.' });
     }
 
     const valid = await bcrypt.compare(password, user.passwordHash);
     if (!valid) {
-      return res.status(401).json({ error: 'Pseudo ou mot de passe incorrect.' });
+      return res.status(401).json({ error: 'Nom d\'utilisateur ou mot de passe incorrect.' });
     }
 
-    const token = jwt.sign({ id: user.id, pseudo: user.pseudo }, JWT_SECRET, {
+    const token = jwt.sign({ id: user.id, username: user.username, pseudo: user.pseudo }, JWT_SECRET, {
       expiresIn: JWT_EXPIRES_IN,
     });
 
     return res.json({
       message: 'Connexion réussie.',
       token,
-      user: { id: user.id, pseudo: user.pseudo },
+      user: { id: user.id, username: user.username, pseudo: user.pseudo },
     });
   } catch (err) {
     console.error('[login] erreur:', err);
@@ -251,7 +276,8 @@ io.use((socket, next) => {
 // Socket.io : logique temps réel
 // ------------------------------------------------------------------
 io.on('connection', (socket) => {
-  console.log(`[socket] connecté: ${socket.id} (${socket.user?.pseudo || 'invité'})`);
+  const connectedUsername = socket.user?.username || socket.user?.pseudo || 'invité';
+  console.log(`[socket] connecté: ${socket.id} (${connectedUsername})`);
 
   // Chaque socket ne peut être que dans une seule room de jeu à la fois.
   let currentRoomId = null;
@@ -259,23 +285,39 @@ io.on('connection', (socket) => {
   // Envoie la liste des rooms au nouvel arrivant
   socket.emit('roomList', publicRoomList());
 
+  // -------------------- Obtenir les rooms (getRooms) --------------------
+  socket.on('getRooms', (callback) => {
+    const roomList = publicRoomList();
+    socket.emit('roomList', roomList);
+    if (typeof callback === 'function') {
+      callback({ ok: true, rooms: roomList });
+    }
+  });
+
   // -------------------- Création de room --------------------
-  // payload: { name, password, mapId, busId, maxPlayers, pseudo }
+  // payload: { roomName, name, isPrivate, password, mapId, busId, maxPlayers, username, pseudo }
   socket.on('createRoom', (payload, callback) => {
     try {
-      const { name, password, mapId, busId, maxPlayers, pseudo } = payload || {};
+      const { roomName, name, isPrivate, password, mapId, busId, maxPlayers, username, pseudo } = payload || {};
       const ack = typeof callback === 'function' ? callback : () => {};
 
-      if (!name || !mapId || !busId) {
-        return ack({ ok: false, error: 'name, mapId et busId sont requis.' });
+      const finalRoomName = String(roomName || name || '').trim();
+      const finalMapId = String(mapId || 'map_tana').trim();
+      const finalBusId = String(busId || 'bus_default').trim();
+
+      if (!finalRoomName) {
+        return ack({ ok: false, error: 'Le nom du salon (roomName ou name) est requis.' });
       }
+
+      const roomIsPrivate = Boolean(isPrivate) || Boolean(password);
 
       const room = {
         id: genId('room'),
-        name: String(name).trim().slice(0, 60),
+        name: finalRoomName.slice(0, 60),
+        isPrivate: roomIsPrivate,
         passwordHash: password ? bcryptSyncHash(password) : null,
-        mapId: String(mapId),
-        busId: String(busId),
+        mapId: finalMapId,
+        busId: finalBusId,
         maxPlayers: Number.isInteger(maxPlayers) && maxPlayers > 0
           ? Math.min(maxPlayers, 64)
           : DEFAULT_MAX_PLAYERS,
@@ -289,13 +331,14 @@ io.on('connection', (socket) => {
       // Le créateur rejoint automatiquement sa room
       const joinResult = joinRoomInternal(socket, room.id, {
         password,
-        mapId,
-        busId,
-        pseudo: pseudo || socket.user?.pseudo || `Joueur_${socket.id.slice(0, 5)}`,
+        mapId: finalMapId,
+        busId: finalBusId,
+        username,
+        pseudo,
       });
 
       if (!joinResult.ok) {
-        rooms.delete(room.id); // rollback si le join échoue (ne devrait pas arriver ici)
+        rooms.delete(room.id); // rollback si le join échoue
         return ack(joinResult);
       }
 
@@ -311,12 +354,17 @@ io.on('connection', (socket) => {
   });
 
   // -------------------- Jonction de room --------------------
-  // payload: { roomId, password, mapId, busId, pseudo }
+  // payload: { roomId, password, mapId, busId, username, pseudo }
   socket.on('joinRoom', (payload, callback) => {
     const ack = typeof callback === 'function' ? callback : () => {};
     try {
       const { roomId } = payload || {};
       if (!roomId) return ack({ ok: false, error: 'roomId requis.' });
+
+      // Quitte la room courante si déjà dans une autre room
+      if (currentRoomId && currentRoomId !== roomId) {
+        leaveCurrentRoom();
+      }
 
       const result = joinRoomInternal(socket, roomId, payload || {});
       if (result.ok) {
@@ -332,10 +380,8 @@ io.on('connection', (socket) => {
 
   /**
    * Logique interne partagée par createRoom/joinRoom.
-   * Contrôle d'accès STRICT : mapId et busId du joueur doivent correspondre
-   * EXACTEMENT à ceux de la room, en plus du mot de passe et de la capacité.
    */
-  function joinRoomInternal(sock, roomId, { password, mapId, busId, pseudo }) {
+  function joinRoomInternal(sock, roomId, { password, mapId, busId, username, pseudo }) {
     const room = rooms.get(roomId);
     if (!room) return { ok: false, error: 'Room introuvable.' };
 
@@ -343,28 +389,33 @@ io.on('connection', (socket) => {
       return { ok: false, error: 'Room pleine.' };
     }
 
-    if (room.passwordHash) {
-      const providedOk = password && bcrypt.compareSync(password, room.passwordHash);
-      if (!providedOk) return { ok: false, error: 'Mot de passe incorrect.' };
+    if (room.passwordHash || room.isPrivate) {
+      if (room.passwordHash) {
+        const providedOk = password && bcrypt.compareSync(password, room.passwordHash);
+        if (!providedOk) return { ok: false, error: 'Mot de passe incorrect.' };
+      }
     }
 
-    // Contrôle d'accès strict map/bus
-    if (String(mapId) !== room.mapId || String(busId) !== room.busId) {
+    // Si mapId et busId sont fournis par le client, vérification de compatibilité
+    if (mapId && String(mapId) !== room.mapId) {
       return {
         ok: false,
-        error: `Incompatibilité de mods : la room exige mapId="${room.mapId}" et busId="${room.busId}".`,
-        code: 'MOD_MISMATCH',
+        error: `Incompatibilité de carte : la room exige mapId="${room.mapId}".`,
+        code: 'MAP_MISMATCH',
       };
     }
 
-    const finalPseudo = (pseudo || sock.user?.pseudo || `Joueur_${sock.id.slice(0, 5)}`)
-      .toString()
+    const finalUsername = String(username || pseudo || sock.user?.username || sock.user?.pseudo || `Joueur_${sock.id.slice(0, 5)}`)
       .trim()
       .slice(0, 24);
 
+    const userId = sock.user?.id || genId('user');
+
     const player = {
       socketId: sock.id,
-      pseudo: finalPseudo,
+      userId,
+      username: finalUsername,
+      pseudo: finalUsername,
       transform: null,
       lastUpdateTs: 0,
     };
@@ -372,34 +423,111 @@ io.on('connection', (socket) => {
     sock.join(room.id);
 
     // Notifie les autres membres de la room
-    sock.to(room.id).emit('playerJoined', { socketId: sock.id, pseudo: finalPseudo });
+    sock.to(room.id).emit('playerJoined', {
+      socketId: sock.id,
+      userId: player.userId,
+      username: player.username,
+      pseudo: player.pseudo,
+    });
 
     // Envoie l'état actuel de la room au nouvel arrivant (dont positions déjà connues)
     sock.emit('roomState', {
       room: publicRoom(room),
       players: Array.from(room.players.values())
         .filter((p) => p.socketId !== sock.id)
-        .map((p) => ({ socketId: p.socketId, pseudo: p.pseudo, transform: p.transform })),
+        .map((p) => ({
+          socketId: p.socketId,
+          userId: p.userId,
+          username: p.username,
+          pseudo: p.pseudo,
+          transform: p.transform,
+        })),
     });
 
     return { ok: true, room: publicRoom(room) };
   }
 
+  // -------------------- Démarrage du jeu (startGame) --------------------
+  socket.on('startGame', (payload, callback) => {
+    const ack = typeof callback === 'function' ? callback : () => {};
+    try {
+      if (!currentRoomId) {
+        return ack({ ok: false, error: 'Vous n\'êtes dans aucune room.' });
+      }
+
+      const room = rooms.get(currentRoomId);
+      if (!room) {
+        return ack({ ok: false, error: 'Room introuvable.' });
+      }
+
+      if (room.hostId !== socket.id) {
+        return ack({ ok: false, error: 'Seul l\'hôte peut démarrer la partie.' });
+      }
+
+      // Permet éventuellement de mettre à jour le mapId lors du lancement si précisé
+      if (payload && payload.mapId) {
+        room.mapId = String(payload.mapId).trim();
+      }
+
+      const pubRoom = publicRoom(room);
+
+      // Émis à tous les membres de la room
+      io.to(room.id).emit('GAME_STARTED', {
+        mapId: room.mapId,
+        room: pubRoom,
+      });
+
+      // Rétrocompatibilité avec l'événement gameStarted
+      io.to(room.id).emit('gameStarted', {
+        mapId: room.mapId,
+        room: pubRoom,
+      });
+
+      return ack({ ok: true, message: 'Partie démarrée !', mapId: room.mapId, room: pubRoom });
+    } catch (err) {
+      console.error('[startGame] erreur:', err);
+      return ack({ ok: false, error: 'Erreur serveur.' });
+    }
+  });
+
   // -------------------- Sortie volontaire de room --------------------
-  socket.on('leaveRoom', () => {
+  socket.on('leaveRoom', (callback) => {
+    const ack = typeof callback === 'function' ? callback : () => {};
     leaveCurrentRoom();
+    return ack({ ok: true });
   });
 
   function leaveCurrentRoom() {
     if (!currentRoomId) return;
     const room = rooms.get(currentRoomId);
     if (room) {
+      const leavingPlayer = room.players.get(socket.id);
       room.players.delete(socket.id);
       socket.leave(room.id);
-      socket.to(room.id).emit('playerLeft', { socketId: socket.id });
+
+      socket.to(room.id).emit('playerLeft', {
+        socketId: socket.id,
+        userId: leavingPlayer?.userId,
+        username: leavingPlayer?.username || leavingPlayer?.pseudo,
+      });
 
       if (room.players.size === 0) {
         rooms.delete(room.id); // nettoyage : room vide supprimée
+      } else if (room.hostId === socket.id) {
+        // Le créateur/hôte a quitté : transfert du rôle d'hôte au joueur suivant
+        const nextHost = Array.from(room.players.values())[0];
+        if (nextHost) {
+          room.hostId = nextHost.socketId;
+          const updatedRoom = publicRoom(room);
+
+          // Diffusion de l'événement hostChanged
+          io.to(room.id).emit('hostChanged', {
+            newHostId: nextHost.socketId,
+            newHostUsername: nextHost.username,
+            newHostPseudo: nextHost.pseudo,
+            room: updatedRoom,
+          });
+        }
       }
       io.emit('roomList', publicRoomList());
     }
@@ -407,13 +535,11 @@ io.on('connection', (socket) => {
   }
 
   // -------------------- Synchronisation véhicule (30 Hz max) --------------------
-  // payload attendu :
+  // Payload accepté :
   // {
   //   position: {x, y, z},
-  //   rotation: {x, y, z, w},   // quaternion
-  //   steerInput: number,
-  //   throttle: number,        // accélérateur (0..1)
-  //   brake: number            // frein (0..1)
+  //   rotation: {x, y, z, w},
+  //   controls: { steerInput, throttle, brake, handbrake }  OU  steerInput, throttle, brake, handbrake à la racine
   // }
   socket.on('vehicleUpdate', (payload) => {
     if (!currentRoomId) return;
@@ -424,12 +550,20 @@ io.on('connection', (socket) => {
     if (!player) return;
 
     const now = Date.now();
-    // Throttle serveur : on ignore les updates trop rapprochées (> 30 Hz)
+    // Throttle serveur : ignore si émis à une fréquence > 30 Hz (~33.3ms)
     if (now - player.lastUpdateTs < MIN_TICK_INTERVAL_MS) return;
     player.lastUpdateTs = now;
 
-    const { position, rotation, steerInput, throttle, brake } = payload || {};
-    if (!position || !rotation) return; // payload invalide, on ignore silencieusement
+    if (!payload || typeof payload !== 'object') return;
+    const { position, rotation, controls } = payload;
+    if (!position || !rotation) return; // position et rotation obligatoires
+
+    // Normalisation des commandes (embrayage/frein/accélérateur/direction)
+    const ctrl = controls || {};
+    const steerInput = Number(ctrl.steerInput ?? payload.steerInput) || 0;
+    const throttle = Number(ctrl.throttle ?? payload.throttle) || 0;
+    const brake = Number(ctrl.brake ?? payload.brake) || 0;
+    const handbrake = Number(ctrl.handbrake ?? payload.handbrake) || 0;
 
     const transform = {
       position: {
@@ -443,17 +577,34 @@ io.on('connection', (socket) => {
         z: Number(rotation.z) || 0,
         w: Number(rotation.w) || 1,
       },
-      steerInput: Number(steerInput) || 0,
-      throttle: Number(throttle) || 0,
-      brake: Number(brake) || 0,
+      controls: {
+        steerInput,
+        throttle,
+        brake,
+        handbrake,
+      },
+      steerInput,
+      throttle,
+      brake,
+      handbrake,
       ts: now,
     };
     player.transform = transform;
 
-    // Diffusion instantanée à tous les AUTRES joueurs de la même room
+    // Diffusion instantanée aux AUTRES membres du salon
     socket.to(room.id).volatile.emit('vehicleUpdate', {
+      roomId: room.id,
       socketId: socket.id,
+      userId: player.userId,
+      username: player.username,
       pseudo: player.pseudo,
+      position: transform.position,
+      rotation: transform.rotation,
+      controls: transform.controls,
+      steerInput,
+      throttle,
+      brake,
+      handbrake,
       transform,
     });
   });
