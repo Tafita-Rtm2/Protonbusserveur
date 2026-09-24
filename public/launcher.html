@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+<title>ProtonBusSync — Launcher</title>
+<style>
+  :root { --bg:#0d1117; --panel:#161b22; --border:#30363d; --text:#e6edf3; --muted:#8b949e; --accent:#ffb300; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif; background:var(--bg); color:var(--text); min-height:100vh; display:flex; align-items:center; justify-content:center; padding:20px; }
+  .card { background:var(--panel); border:1px solid var(--border); border-radius:12px; padding:24px; width:100%; max-width:420px; }
+  h1 { font-size:1.3rem; margin:0 0 16px; text-align:center; }
+  label { display:block; font-size:0.8rem; color:var(--muted); margin:10px 0 4px; }
+  input, select { width:100%; padding:10px; background:#0d1117; border:1px solid var(--border); border-radius:6px; color:var(--text); font-size:0.95rem; }
+  button { width:100%; padding:12px; margin-top:14px; border:none; border-radius:6px; background:var(--accent); color:#1a1a1a; font-weight:600; font-size:0.95rem; cursor:pointer; }
+  button.secondary { background:transparent; border:1px solid var(--border); color:var(--text); }
+  .msg { margin-top:10px; font-size:0.85rem; min-height:1.2em; }
+  .msg.err { color:#f85149; }
+  .msg.ok { color:#3fb950; }
+  .room { display:flex; justify-content:space-between; align-items:center; padding:10px; border:1px solid var(--border); border-radius:8px; margin-bottom:8px; }
+  .room button { width:auto; margin:0; padding:6px 14px; font-size:0.85rem; }
+  .hidden { display:none; }
+  .divider { text-align:center; color:var(--muted); font-size:0.8rem; margin:16px 0; }
+</style>
+</head>
+<body>
+
+<div class="card">
+
+  <!-- Étape 1 : connexion / inscription -->
+  <div id="authScreen">
+    <h1>ProtonBusSync</h1>
+    <label for="pseudo">Pseudo</label>
+    <input id="pseudo" placeholder="ex: Miantavola" />
+    <label for="password">Mot de passe</label>
+    <input id="password" type="password" placeholder="••••••••" />
+    <button onclick="login()">Se connecter</button>
+    <button class="secondary" onclick="register()">Créer un compte</button>
+    <div id="authMsg" class="msg"></div>
+  </div>
+
+  <!-- Étape 2 : liste des salons / création -->
+  <div id="roomsScreen" class="hidden">
+    <h1>Choisir un salon</h1>
+    <div id="roomsList"></div>
+    <div class="divider">— ou —</div>
+    <label for="roomName">Nom du salon</label>
+    <input id="roomName" placeholder="ex: Ligne Antananarivo" />
+    <label for="mapId">Map (doit correspondre à celle chargée en jeu)</label>
+    <input id="mapId" value="map_tana" />
+    <label for="busId">Bus (doit correspondre à celui chargé en jeu)</label>
+    <input id="busId" value="bus_setra" />
+    <button onclick="createRoom()">Créer et lancer le jeu</button>
+    <div id="roomsMsg" class="msg"></div>
+  </div>
+
+</div>
+
+<script>
+  const API_BASE = ""; // même origine que la page, pas besoin de préciser l'hôte
+  let authToken = null;
+  let currentPseudo = null;
+
+  async function authRequest(endpoint) {
+    const pseudo = document.getElementById('pseudo').value.trim();
+    const password = document.getElementById('password').value;
+    const msgEl = document.getElementById('authMsg');
+    msgEl.className = 'msg';
+    msgEl.textContent = 'Connexion...';
+
+    try {
+      const res = await fetch(API_BASE + endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pseudo, password }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Erreur inconnue');
+
+      authToken = data.token;
+      currentPseudo = data.user.pseudo;
+      msgEl.className = 'msg ok';
+      msgEl.textContent = 'Connecté !';
+      showRoomsScreen();
+    } catch (err) {
+      msgEl.className = 'msg err';
+      msgEl.textContent = err.message;
+    }
+  }
+
+  function login() { authRequest('/api/login'); }
+  function register() { authRequest('/api/register'); }
+
+  async function showRoomsScreen() {
+    document.getElementById('authScreen').classList.add('hidden');
+    document.getElementById('roomsScreen').classList.remove('hidden');
+    await refreshRooms();
+  }
+
+  async function refreshRooms() {
+    const res = await fetch(API_BASE + '/api/rooms');
+    const data = await res.json();
+    const listEl = document.getElementById('roomsList');
+
+    if (!data.rooms.length) {
+      listEl.innerHTML = '<p style="color:var(--muted);font-size:0.85rem;">Aucun salon actif — crée le tien ci-dessous.</p>';
+      return;
+    }
+
+    listEl.innerHTML = data.rooms.map(r => `
+      <div class="room">
+        <div>
+          <strong>${escapeHtml(r.name)}</strong><br/>
+          <span style="color:var(--muted);font-size:0.8rem;">${escapeHtml(r.mapId)} / ${escapeHtml(r.busId)} — ${r.playerCount}/${r.maxPlayers}</span>
+        </div>
+        <button onclick='joinRoom(${JSON.stringify(r.id)}, ${JSON.stringify(r.mapId)}, ${JSON.stringify(r.busId)})'>Rejoindre</button>
+      </div>
+    `).join('');
+  }
+
+  function escapeHtml(str) {
+    return String(str).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+
+  // --- Pont vers l'appli Android ---
+  // AndroidHost est injecté par MainActivity.kt (addJavascriptInterface).
+  // Absent si la page est ouverte dans un navigateur normal (utile pour tester
+  // l'UI web seule sans l'appli).
+  function sendToAndroid(config) {
+    if (window.AndroidHost && typeof window.AndroidHost.launchGame === 'function') {
+      window.AndroidHost.launchGame(JSON.stringify(config));
+    } else {
+      console.warn('AndroidHost non disponible (test hors appli ?) — config:', config);
+      document.getElementById('roomsMsg').textContent =
+        'AndroidHost non détecté — ouvre cette page depuis le launcher Android.';
+    }
+  }
+
+  function joinRoom(roomId, mapId, busId) {
+    sendToAndroid({
+      action: 'join',
+      roomId, mapId, busId,
+      pseudo: currentPseudo,
+      token: authToken,
+    });
+  }
+
+  function createRoom() {
+    const name = document.getElementById('roomName').value.trim();
+    const mapId = document.getElementById('mapId').value.trim();
+    const busId = document.getElementById('busId').value.trim();
+    if (!name || !mapId || !busId) {
+      document.getElementById('roomsMsg').textContent = 'Remplis tous les champs.';
+      return;
+    }
+    sendToAndroid({
+      action: 'create',
+      name, mapId, busId,
+      maxPlayers: 10,
+      pseudo: currentPseudo,
+      token: authToken,
+    });
+  }
+</script>
+
+</body>
+</html>
