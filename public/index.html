@@ -667,7 +667,9 @@
           roomId: room.id,
           mapId: room.mapId,
           busId: room.busId,
-          serverUrl: SERVER_URL
+          serverUrl: SERVER_URL,
+          showNameTag: true,
+          showVoiceIcon: true
         };
         launchGameViaAndroidHost(configData);
       } else {
@@ -716,7 +718,9 @@
           roomId: createdRoom.id,
           mapId: createdRoom.mapId,
           busId: createdRoom.busId,
-          serverUrl: SERVER_URL
+          serverUrl: SERVER_URL,
+          showNameTag: true,
+          showVoiceIcon: true
         };
         launchGameViaAndroidHost(configData);
       } else {

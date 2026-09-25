@@ -609,6 +609,10 @@ io.on('connection', (socket) => {
     };
     player.transform = transform;
 
+    // Options de rendu / voix éventuelles dans le payload
+    const showNameTag = payload.showNameTag !== undefined ? Boolean(payload.showNameTag) : true;
+    const showVoiceIcon = payload.showVoiceIcon !== undefined ? Boolean(payload.showVoiceIcon) : true;
+
     // Diffusion instantanée aux AUTRES membres du salon
     socket.to(room.id).volatile.emit('vehicleUpdate', {
       roomId: room.id,
@@ -623,6 +627,8 @@ io.on('connection', (socket) => {
       throttle,
       brake,
       handbrake,
+      showNameTag,
+      showVoiceIcon,
       transform,
     });
   });
