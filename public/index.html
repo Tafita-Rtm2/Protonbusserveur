@@ -2,281 +2,597 @@
 <html lang="fr">
 <head>
 <meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Proton Bus Simulator — Serveur Multijoueur</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+<title>Proton Bus Simulator — Multi Launcher</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.5/socket.io.min.js"></script>
 <style>
   :root {
-    --bg: #0d1117;
-    --panel: #161b22;
-    --border: #30363d;
-    --text: #e6edf3;
-    --muted: #8b949e;
-    --accent: #ffb300;
-    --accent2: #3fb950;
-    --danger: #f85149;
+    --bg-dark: #0b0e14;
+    --card-bg: rgba(22, 27, 34, 0.85);
+    --card-border: #21262d;
+    --accent-gold: #ffb300;
+    --accent-gold-hover: #ffa000;
+    --accent-cyan: #00e5ff;
+    --accent-green: #2ea44f;
+    --accent-red: #da3633;
+    --text-primary: #f0f6fc;
+    --text-secondary: #8b949e;
+    --font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
   }
-  * { box-sizing: border-box; }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
   body {
-    margin: 0;
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-    background: var(--bg);
-    color: var(--text);
-    padding: 20px;
-  }
-  h1 { font-size: 1.4rem; margin: 0 0 4px; }
-  .sub { color: var(--muted); margin: 0 0 20px; font-size: 0.9rem; }
-  .grid {
-    display: grid;
-    grid-template-columns: 1fr;
-    gap: 16px;
-    max-width: 1100px;
-    margin: 0 auto;
-  }
-  @media (min-width: 820px) {
-    .grid { grid-template-columns: 1.3fr 1fr; }
-  }
-  .panel {
-    background: var(--panel);
-    border: 1px solid var(--border);
-    border-radius: 10px;
+    font-family: var(--font-family);
+    background-color: var(--bg-dark);
+    background-image:
+      radial-gradient(circle at 15% 15%, rgba(255, 179, 0, 0.05) 0%, transparent 40%),
+      radial-gradient(circle at 85% 85%, rgba(0, 229, 255, 0.05) 0%, transparent 40%);
+    color: var(--text-primary);
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
     padding: 16px;
   }
-  .panel h2 {
-    margin: 0 0 12px;
-    font-size: 1rem;
+
+  header {
+    width: 100%;
+    max-width: 960px;
+    margin-bottom: 20px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 12px;
+    border-bottom: 1px solid var(--card-border);
+    padding-bottom: 16px;
+  }
+
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .brand-logo {
+    font-size: 2rem;
+    line-height: 1;
+  }
+
+  .brand-title h1 {
+    font-size: 1.3rem;
+    font-weight: 800;
+    letter-spacing: 0.5px;
+    background: linear-gradient(135deg, #fff 0%, var(--accent-gold) 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    text-transform: uppercase;
+  }
+
+  .brand-title p {
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+  }
+
+  .user-bar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    background: var(--card-bg);
+    border: 1px solid var(--card-border);
+    border-radius: 20px;
+    padding: 6px 14px;
+  }
+
+  .user-bar label {
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+  }
+
+  .user-bar input {
+    background: transparent;
+    border: none;
+    color: var(--accent-gold);
+    font-weight: 700;
+    font-size: 0.95rem;
+    outline: none;
+    width: 130px;
+  }
+
+  .main-container {
+    width: 100%;
+    max-width: 960px;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+  }
+
+  /* Banner Avertissement APK */
+  .apk-warning {
+    background: rgba(218, 54, 51, 0.15);
+    border: 1px solid rgba(218, 54, 51, 0.4);
+    border-radius: 10px;
+    padding: 12px 16px;
+    color: #ff7b72;
+    font-size: 0.88rem;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .card {
+    background: var(--card-bg);
+    border: 1px solid var(--card-border);
+    border-radius: 12px;
+    padding: 20px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+    backdrop-filter: blur(8px);
+  }
+
+  .card-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 16px;
+  }
+
+  .card-title {
+    font-size: 1.1rem;
+    font-weight: 700;
     display: flex;
     align-items: center;
     gap: 8px;
   }
-  .dot {
-    width: 8px; height: 8px; border-radius: 50%;
-    background: var(--accent2);
-    box-shadow: 0 0 6px var(--accent2);
-  }
-  .stats { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
-  .stat {
-    background: #0d1117;
-    border: 1px solid var(--border);
+
+  .btn {
+    padding: 10px 18px;
     border-radius: 8px;
-    padding: 8px 12px;
-    flex: 1;
-    min-width: 90px;
-    text-align: center;
+    font-size: 0.9rem;
+    font-weight: 700;
+    cursor: pointer;
+    border: none;
+    transition: all 0.2s ease;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
   }
-  .stat b { display: block; font-size: 1.3rem; color: var(--accent); }
-  .stat span { font-size: 0.7rem; color: var(--muted); text-transform: uppercase; }
-  table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
-  th, td { text-align: left; padding: 6px 4px; border-bottom: 1px solid var(--border); }
-  th { color: var(--muted); font-weight: 500; }
-  .empty { color: var(--muted); font-style: italic; padding: 8px 0; }
-  label { display: block; font-size: 0.8rem; color: var(--muted); margin: 8px 0 3px; }
-  input, select {
+
+  .btn-primary {
+    background: var(--accent-gold);
+    color: #0d1117;
+  }
+
+  .btn-primary:hover {
+    background: var(--accent-gold-hover);
+    transform: translateY(-1px);
+  }
+
+  .btn-secondary {
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid var(--card-border);
+    color: var(--text-primary);
+  }
+
+  .btn-secondary:hover {
+    background: rgba(255, 255, 255, 0.1);
+  }
+
+  .btn-green {
+    background: var(--accent-green);
+    color: #fff;
+  }
+
+  .btn-green:hover {
+    filter: brightness(1.1);
+  }
+
+  .btn-sm {
+    padding: 6px 12px;
+    font-size: 0.8rem;
+  }
+
+  /* Table des salons */
+  .table-responsive {
     width: 100%;
-    padding: 8px 10px;
-    background: #0d1117;
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    color: var(--text);
+    overflow-x: auto;
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    text-align: left;
     font-size: 0.9rem;
   }
-  .row-2 { display: flex; gap: 8px; }
-  .row-2 > div { flex: 1; }
-  button {
-    margin-top: 10px;
-    width: 100%;
-    padding: 9px;
-    border: none;
-    border-radius: 6px;
-    background: var(--accent);
-    color: #1a1a1a;
+
+  th {
+    padding: 12px 10px;
+    color: var(--text-secondary);
     font-weight: 600;
-    cursor: pointer;
-    font-size: 0.88rem;
+    border-bottom: 1px solid var(--card-border);
+    font-size: 0.8rem;
+    text-transform: uppercase;
   }
-  button.secondary {
-    background: transparent;
-    border: 1px solid var(--border);
-    color: var(--text);
-    margin-top: 6px;
+
+  td {
+    padding: 14px 10px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+    vertical-align: middle;
   }
-  button.green {
-    background: var(--accent2);
-    color: #000;
+
+  tr:hover td {
+    background: rgba(255, 255, 255, 0.02);
   }
-  .msg { margin-top: 8px; font-size: 0.82rem; min-height: 1.2em; word-break: break-all; }
-  .msg.ok { color: var(--accent2); }
-  .msg.err { color: var(--danger); }
+
+  .room-name-cell {
+    font-weight: 700;
+    color: var(--text-primary);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
   .badge {
-    display: inline-block;
     font-size: 0.7rem;
-    padding: 1px 6px;
+    padding: 2px 6px;
     border-radius: 4px;
-    background: #21262d;
-    color: var(--muted);
+    font-weight: 600;
   }
-  .badge.priv { background: #3d1214; color: #f85149; }
-  .badge.pub { background: #12331b; color: #3fb950; }
-  .hidden { display: none; }
-  .logs {
+
+  .badge-lock {
+    background: rgba(218, 54, 51, 0.2);
+    color: #ff7b72;
+    border: 1px solid rgba(218, 54, 51, 0.3);
+  }
+
+  .badge-open {
+    background: rgba(46, 164, 79, 0.2);
+    color: #56d364;
+    border: 1px solid rgba(46, 164, 79, 0.3);
+  }
+
+  .empty-state {
+    text-align: center;
+    padding: 30px 10px;
+    color: var(--text-secondary);
+    font-style: italic;
+  }
+
+  /* Modal */
+  .modal-overlay {
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(0, 0, 0, 0.75);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+    z-index: 100;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.2s ease;
+  }
+
+  .modal-overlay.active {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  .modal {
+    background: #161b22;
+    border: 1px solid var(--card-border);
+    border-radius: 12px;
+    width: 100%;
+    max-width: 440px;
+    padding: 24px;
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+  }
+
+  .modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 18px;
+  }
+
+  .modal-title {
+    font-size: 1.1rem;
+    font-weight: 700;
+  }
+
+  .close-btn {
+    background: transparent;
+    border: none;
+    color: var(--text-secondary);
+    font-size: 1.3rem;
+    cursor: pointer;
+  }
+
+  .form-group {
+    margin-bottom: 14px;
+  }
+
+  .form-group label {
+    display: block;
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+    margin-bottom: 6px;
+    font-weight: 600;
+  }
+
+  .form-control {
+    width: 100%;
+    padding: 10px 12px;
     background: #0d1117;
-    border: 1px solid var(--border);
+    border: 1px solid var(--card-border);
     border-radius: 6px;
-    padding: 8px;
-    font-family: monospace;
-    font-size: 0.75rem;
-    height: 120px;
-    overflow-y: auto;
-    color: var(--muted);
+    color: var(--text-primary);
+    font-size: 0.9rem;
+    outline: none;
+  }
+
+  .form-control:focus {
+    border-color: var(--accent-gold);
+  }
+
+  .form-row {
+    display: flex;
+    gap: 12px;
+  }
+
+  .form-row .form-group {
+    flex: 1;
+  }
+
+  .modal-actions {
+    margin-top: 20px;
+    display: flex;
+    gap: 10px;
+    justify-content: flex-end;
+  }
+
+  .msg-banner {
     margin-top: 10px;
+    padding: 8px 12px;
+    border-radius: 6px;
+    font-size: 0.85rem;
+    display: none;
+  }
+
+  .msg-banner.error {
+    display: block;
+    background: rgba(218, 54, 51, 0.2);
+    color: #ff7b72;
+    border: 1px solid rgba(218, 54, 51, 0.3);
+  }
+
+  .msg-banner.success {
+    display: block;
+    background: rgba(46, 164, 79, 0.2);
+    color: #56d364;
+    border: 1px solid rgba(46, 164, 79, 0.3);
+  }
+
+  footer {
+    margin-top: 30px;
+    color: var(--text-secondary);
+    font-size: 0.8rem;
+    text-align: center;
+  }
+
+  footer a {
+    color: var(--accent-gold);
+    text-decoration: none;
   }
 </style>
 </head>
 <body>
 
-<h1>🚌 Proton Bus Simulator — Dashboard Serveur</h1>
-<p class="sub">Gestion des comptes, création de rooms publiques/privées, choix des cartes & Start Game.</p>
-
-<div class="grid">
-
-  <div class="panel">
-    <h2><span class="dot"></span> Salles en direct</h2>
-    <div class="stats">
-      <div class="stat"><b id="statRooms">0</b><span>Rooms</span></div>
-      <div class="stat"><b id="statPlayers">0</b><span>Joueurs</span></div>
-      <div class="stat"><b id="statSockets">0</b><span>Connexions</span></div>
+<header>
+  <div class="brand">
+    <div class="brand-logo">🚌</div>
+    <div class="brand-title">
+      <h1>Proton Bus Sync</h1>
+      <p>Launcher Multijoueur Dynamique</p>
     </div>
-    <table>
-      <thead>
-        <tr><th>Room</th><th>Map / Bus</th><th>Accès</th><th>Joueurs</th></tr>
-      </thead>
-      <tbody id="roomsBody">
-        <tr><td colspan="4" class="empty">Aucune room active pour le moment.</td></tr>
-      </tbody>
-    </table>
-
-    <h2 style="margin-top: 16px;">🎮 Tester Start Game</h2>
-    <div class="row-2">
-      <div>
-        <label for="startMapId">Map ID</label>
-        <input id="startMapId" value="map_tana" />
-      </div>
-      <div>
-        <label>&nbsp;</label>
-        <button class="green" onclick="doStartGame()">▶ Démarrer la partie (Host)</button>
-      </div>
-    </div>
-    <div id="gameMsg" class="msg"></div>
-
-    <div class="logs" id="eventLogs">[Logs événements Socket.io...]</div>
   </div>
 
-  <div>
-    <div class="panel">
-      <h2>🔐 Authentification (Comptes)</h2>
-      <label for="username">Username / Pseudo</label>
-      <input id="username" placeholder="ex: Miantavola" />
-      <label for="password">Mot de passe</label>
-      <input id="password" type="password" placeholder="••••••••" />
-      <button onclick="doRegister()">Créer un compte (POST /api/register)</button>
-      <button class="secondary" onclick="doLogin()">Se connecter (POST /api/login)</button>
-      <div id="authMsg" class="msg"></div>
+  <div class="user-bar">
+    <label for="playerPseudo">👤 Joueur :</label>
+    <input id="playerPseudo" placeholder="Ton pseudo..." />
+  </div>
+</header>
+
+<div class="main-container">
+
+  <!-- Avertissement si ouvert dans un navigateur classique -->
+  <div id="noAndroidHostBanner" class="apk-warning" style="display: none;">
+    ⚠️ <strong>Information :</strong> Ouvrez cette page depuis l'application Launcher Proton Bus Sync pour lancer le jeu.
+  </div>
+
+  <!-- Carte Liste des Salons -->
+  <div class="card">
+    <div class="card-header">
+      <div class="card-title">🌐 Salons Disponibles en Direct</div>
+      <button class="btn btn-primary btn-sm" onclick="openCreateRoomModal()">+ Créer un Salon</button>
     </div>
 
-    <div class="panel" style="margin-top: 16px;">
-      <h2>🏠 Créer / Rejoindre une Room</h2>
-
-      <div id="roomPanelLocked">
-        <p style="color:var(--muted); font-size:0.85rem;">
-          🔒 Compte obligatoire — crée un compte ou connecte-toi ci-dessus pour
-          pouvoir créer ou rejoindre une room.
-        </p>
-      </div>
-
-      <div id="roomPanelContent" class="hidden">
-        <p style="color:var(--accent2); font-size:0.8rem; margin:0 0 8px;">
-          Connecté en tant que <b id="connectedAs"></b>
-        </p>
-
-        <label for="roomName">Nom du Salon (roomName)</label>
-        <input id="roomName" placeholder="Salon Tana Express" value="Salon Tana Express" />
-
-        <div class="row-2">
-          <div>
-            <label for="mapId">Map ID</label>
-            <input id="mapId" value="map_tana" />
-          </div>
-          <div>
-            <label for="busId">Bus ID</label>
-            <input id="busId" value="bus_default" />
-          </div>
-        </div>
-
-        <div class="row-2">
-          <div>
-            <label for="isPrivate">Accès</label>
-            <select id="isPrivate" onchange="toggleRoomPassword()">
-              <option value="false">Publique</option>
-              <option value="true">Privée (Mot de passe)</option>
-            </select>
-          </div>
-          <div>
-            <label for="roomPassword">Mot de passe Room</label>
-            <input id="roomPassword" type="password" placeholder="optionnel" disabled />
-          </div>
-        </div>
-
-        <button onclick="doCreateRoom()">Créer la Room (Socket.io)</button>
-        <div id="roomMsg" class="msg"></div>
-      </div>
+    <div class="table-responsive">
+      <table>
+        <thead>
+          <tr>
+            <th>Nom du Salon</th>
+            <th>Carte (Map ID)</th>
+            <th>Bus (Bus ID)</th>
+            <th>Joueurs</th>
+            <th style="text-align: right;">Action</th>
+          </tr>
+        </thead>
+        <tbody id="roomsTableBody">
+          <tr>
+            <td colspan="5" class="empty-state">Chargement des salons en cours...</td>
+          </tr>
+        </tbody>
+      </table>
     </div>
   </div>
 
 </div>
 
+<!-- Modal Créer un Salon -->
+<div id="createRoomModal" class="modal-overlay">
+  <div class="modal">
+    <div class="modal-header">
+      <div class="modal-title">🏠 Créer un nouveau salon</div>
+      <button class="close-btn" onclick="closeCreateRoomModal()">&times;</button>
+    </div>
+    <form id="createRoomForm" onsubmit="handleCreateRoom(event)">
+      <div class="form-group">
+        <label for="createRoomName">Nom du Salon</label>
+        <input id="createRoomName" class="form-control" placeholder="ex: Convoi Tana - Tamatave" required />
+      </div>
+
+      <div class="form-row">
+        <div class="form-group">
+          <label for="createMapId">Choix de la Carte (mapId)</label>
+          <input id="createMapId" class="form-control" value="map_tana" required />
+        </div>
+        <div class="form-group">
+          <label for="createBusId">Choix du Bus (busId)</label>
+          <input id="createBusId" class="form-control" value="bus_default" required />
+        </div>
+      </div>
+
+      <div class="form-row">
+        <div class="form-group">
+          <label for="createRoomPassword">Mot de passe (optionnel)</label>
+          <input id="createRoomPassword" type="password" class="form-control" placeholder="Laissez vide si public" />
+        </div>
+        <div class="form-group">
+          <label for="createMaxPlayers">Joueurs Max</label>
+          <input id="createMaxPlayers" type="number" class="form-control" value="10" min="2" max="64" />
+        </div>
+      </div>
+
+      <div id="createRoomMsg" class="msg-banner"></div>
+
+      <div class="modal-actions">
+        <button type="button" class="btn btn-secondary" onclick="closeCreateRoomModal()">Annuler</button>
+        <button type="submit" class="btn btn-primary">Créer & Lancer</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Modal Mot de passe Rejoindre -->
+<div id="joinPasswordModal" class="modal-overlay">
+  <div class="modal">
+    <div class="modal-header">
+      <div class="modal-title">🔒 Salon Protégé</div>
+      <button class="close-btn" onclick="closeJoinPasswordModal()">&times;</button>
+    </div>
+    <form id="joinPasswordForm" onsubmit="handleJoinPasswordSubmit(event)">
+      <div class="form-group">
+        <label for="joinPasswordInput">Ce salon nécessite un mot de passe :</label>
+        <input id="joinPasswordInput" type="password" class="form-control" placeholder="Mot de passe du salon" required />
+      </div>
+
+      <div id="joinPasswordMsg" class="msg-banner"></div>
+
+      <div class="modal-actions">
+        <button type="button" class="btn btn-secondary" onclick="closeJoinPasswordModal()">Annuler</button>
+        <button type="submit" class="btn btn-green">Rejoindre</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<footer>
+  Proton Bus Simulator — Serveur Multijoueur | <a href="/admin.html">Dashboard Admin</a>
+</footer>
+
 <script>
+  // --- Configuration globale ---
+  const DEFAULT_SERVER_URL = "https://tafitaniaina-tvserveur.hf.space";
+  const SERVER_URL = window.location.origin && window.location.origin.startsWith("http")
+    ? window.location.origin
+    : DEFAULT_SERVER_URL;
+
   let socket = null;
-  let authToken = null;
+  let activeRooms = [];
+  let pendingJoinRoom = null;
 
-  function connectAuthenticatedSocket(token) {
-    if (socket) socket.disconnect();
-    socket = io({ transports: ['websocket', 'polling'], auth: { token } });
-    attachSocketHandlers();
+  // --- Gestion du pseudo dans LocalStorage ---
+  const pseudoInput = document.getElementById('playerPseudo');
+  const savedPseudo = localStorage.getItem('proton_bus_pseudo') || 'Chauffeur_' + Math.floor(1000 + Math.random() * 9000);
+  pseudoInput.value = savedPseudo;
+
+  pseudoInput.addEventListener('change', () => {
+    const val = pseudoInput.value.trim() || ('Chauffeur_' + Math.floor(1000 + Math.random() * 9000));
+    pseudoInput.value = val;
+    localStorage.setItem('proton_bus_pseudo', val);
+  });
+
+  // --- Détection de AndroidHost ---
+  const isAndroidHostAvailable = Boolean(window.AndroidHost && typeof window.AndroidHost.launchGame === 'function');
+  if (!isAndroidHostAvailable) {
+    document.getElementById('noAndroidHostBanner').style.display = 'flex';
   }
 
-  function logEvent(text) {
-    const logs = document.getElementById('eventLogs');
-    const time = new Date().toLocaleTimeString();
-    logs.innerHTML += `<div>[${time}] ${escapeHtml(text)}</div>`;
-    logs.scrollTop = logs.scrollHeight;
-  }
+  // --- Connexion Socket.io ---
+  socket = io({ transports: ['websocket', 'polling'] });
 
-  function toggleRoomPassword() {
-    const isPriv = document.getElementById('isPrivate').value === 'true';
-    const pwdInput = document.getElementById('roomPassword');
-    pwdInput.disabled = !isPriv;
-    if (!isPriv) pwdInput.value = '';
-  }
+  socket.on('connect', () => {
+    console.log('Connecté au serveur Socket.io');
+  });
 
-  function renderRooms(rooms) {
-    const body = document.getElementById('roomsBody');
-    document.getElementById('statRooms').textContent = rooms.length;
-    const totalPlayers = rooms.reduce((s, r) => s + r.playerCount, 0);
-    document.getElementById('statPlayers').textContent = totalPlayers;
+  socket.on('roomList', (rooms) => {
+    activeRooms = rooms || [];
+    renderRoomsList(activeRooms);
+  });
 
-    if (!rooms.length) {
-      body.innerHTML = '<tr><td colspan="4" class="empty">Aucune room active pour le moment.</td></tr>';
+  // --- Rendu de la liste des salons ---
+  function renderRoomsList(rooms) {
+    const tbody = document.getElementById('roomsTableBody');
+    if (!rooms || rooms.length === 0) {
+      tbody.innerHTML = `
+        <tr>
+          <td colspan="5" class="empty-state">
+            Aucun salon disponible pour le moment.<br>Soyez le premier à en créer un !
+          </td>
+        </tr>
+      `;
       return;
     }
 
-    body.innerHTML = rooms.map(r => `
-      <tr>
-        <td><b>${escapeHtml(r.roomName || r.name)}</b></td>
-        <td>${escapeHtml(r.mapId)} / ${escapeHtml(r.busId)}</td>
-        <td>${r.isPrivate ? '<span class="badge priv">Privée 🔒</span>' : '<span class="badge pub">Publique</span>'}</td>
-        <td>${r.playerCount} / ${r.maxPlayers}</td>
-      </tr>
-    `).join('');
+    tbody.innerHTML = rooms.map(room => {
+      const isLocked = Boolean(room.hasPassword || room.isPrivate);
+      const lockBadge = isLocked
+        ? '<span class="badge badge-lock">🔒 Privé</span>'
+        : '<span class="badge badge-open">🌐 Public</span>';
+
+      return `
+        <tr>
+          <td>
+            <div class="room-name-cell">
+              ${escapeHtml(room.roomName || room.name)}
+              ${lockBadge}
+            </div>
+          </td>
+          <td><code>${escapeHtml(room.mapId)}</code></td>
+          <td><code>${escapeHtml(room.busId)}</code></td>
+          <td><strong>${room.playerCount}</strong> / ${room.maxPlayers}</td>
+          <td style="text-align: right;">
+            <button class="btn btn-green btn-sm" onclick="initiateJoinRoom('${room.id}')">
+              Rejoindre
+            </button>
+          </td>
+        </tr>
+      `;
+    }).join('');
   }
 
   function escapeHtml(str) {
@@ -285,120 +601,131 @@
     }[c]));
   }
 
-  function attachSocketHandlers() {
-    socket.on('connect', () => logEvent(`Socket connecté (id: ${socket.id})`));
-    socket.on('disconnect', () => logEvent('Socket déconnecté'));
-    socket.on('roomList', (list) => {
-      renderRooms(list);
-      logEvent(`Mise à jour des rooms (${list.length} active(s))`);
-    });
+  // --- Lancement vers Android APK ---
+  function launchGameViaAndroidHost(configData) {
+    console.log('Transmission de la configuration à l\'APK Android :', configData);
 
-    socket.on('playerJoined', (data) => logEvent(`Joueur rejoint: ${data.username || data.pseudo}`));
-    socket.on('playerLeft', (data) => logEvent(`Joueur parti: ${data.username || data.pseudo}`));
-    socket.on('hostChanged', (data) => logEvent(`Nouvel hôte attribué: ${data.newHostUsername} (${data.newHostId})`));
-    socket.on('GAME_STARTED', (data) => logEvent(`🚀 GAME_STARTED reçu ! Map = ${data.mapId}`));
-  }
-
-  async function refreshStats() {
-    try {
-      const res = await fetch('/api/stats');
-      const data = await res.json();
-      document.getElementById('statSockets').textContent = data.connectedSockets;
-    } catch (e) { /* silencieux */ }
-  }
-  setInterval(refreshStats, 4000);
-  refreshStats();
-
-  async function doRegister() {
-    await authRequest('/api/register', 'Compte créé avec succès !');
-  }
-  async function doLogin() {
-    await authRequest('/api/login', 'Connexion réussie !');
-  }
-
-  async function authRequest(endpoint, successMsg) {
-    const username = document.getElementById('username').value.trim();
-    const password = document.getElementById('password').value;
-    const msgEl = document.getElementById('authMsg');
-    msgEl.className = 'msg';
-    msgEl.textContent = 'Envoi en cours...';
-
-    try {
-      const res = await fetch(endpoint, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username, pseudo: username, password }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Erreur inconnue');
-      msgEl.className = 'msg ok';
-      msgEl.textContent = `${successMsg} Connecté en tant que ${data.user.username}.`;
-      logEvent(`REST: ${successMsg} (${username})`);
-
-      authToken = data.token;
-      connectAuthenticatedSocket(authToken);
-      unlockRoomPanel(data.user.username);
-    } catch (err) {
-      msgEl.className = 'msg err';
-      msgEl.textContent = err.message;
+    if (window.AndroidHost && typeof window.AndroidHost.launchGame === 'function') {
+      window.AndroidHost.launchGame(JSON.stringify(configData));
+    } else {
+      console.warn('AndroidHost.launchGame non disponible. Fallback navigateur.');
+      alert("Ouvrez cette page depuis l'application Launcher Proton Bus Sync pour lancer le jeu.\n\nConfiguration :\n" + JSON.stringify(configData, null, 2));
     }
   }
 
-  function unlockRoomPanel(username) {
-    document.getElementById('roomPanelLocked').classList.add('hidden');
-    document.getElementById('roomPanelContent').classList.remove('hidden');
-    document.getElementById('connectedAs').textContent = username;
+  function getCurrentPseudo() {
+    const p = pseudoInput.value.trim();
+    if (p) return p;
+    const fallback = 'Chauffeur_' + Math.floor(1000 + Math.random() * 9000);
+    pseudoInput.value = fallback;
+    localStorage.setItem('proton_bus_pseudo', fallback);
+    return fallback;
   }
 
-  function doCreateRoom() {
-    if (!socket) {
-      document.getElementById('roomMsg').className = 'msg err';
-      document.getElementById('roomMsg').textContent = 'Connecte-toi d\'abord (compte obligatoire).';
-      return;
+  // --- Action Rejoindre Salon ---
+  function initiateJoinRoom(roomId) {
+    const room = activeRooms.find(r => r.id === roomId);
+    if (!room) return;
+
+    if (room.hasPassword || room.isPrivate) {
+      pendingJoinRoom = room;
+      document.getElementById('joinPasswordInput').value = '';
+      document.getElementById('joinPasswordMsg').className = 'msg-banner';
+      document.getElementById('joinPasswordModal').classList.add('active');
+    } else {
+      executeJoinRoom(room, null);
     }
+  }
 
-    const roomName = document.getElementById('roomName').value;
-    const mapId = document.getElementById('mapId').value;
-    const busId = document.getElementById('busId').value;
-    const isPrivate = document.getElementById('isPrivate').value === 'true';
-    const password = document.getElementById('roomPassword').value;
-    const msgEl = document.getElementById('roomMsg');
+  function closeJoinPasswordModal() {
+    document.getElementById('joinPasswordModal').classList.remove('active');
+    pendingJoinRoom = null;
+  }
 
-    socket.emit('createRoom', {
-      roomName,
-      mapId,
-      busId,
-      isPrivate,
-      password,
+  function handleJoinPasswordSubmit(e) {
+    e.preventDefault();
+    if (!pendingJoinRoom) return;
+
+    const pwd = document.getElementById('joinPasswordInput').value;
+    executeJoinRoom(pendingJoinRoom, pwd);
+  }
+
+  function executeJoinRoom(room, password) {
+    const pseudo = getCurrentPseudo();
+
+    socket.emit('joinRoom', {
+      roomId: room.id,
+      password: password,
+      mapId: room.mapId,
+      busId: room.busId,
+      pseudo: pseudo
     }, (res) => {
       if (res && res.ok) {
-        msgEl.className = 'msg ok';
-        msgEl.textContent = `Room "${res.room.roomName}" créée avec succès ! ID: ${res.room.id}`;
-        logEvent(`Room créée: ${res.room.roomName} (${res.room.isPrivate ? 'Privée' : 'Publique'})`);
+        closeJoinPasswordModal();
+        const configData = {
+          pseudo: pseudo,
+          roomId: room.id,
+          mapId: room.mapId,
+          busId: room.busId,
+          serverUrl: SERVER_URL,
+          showNameTag: true,
+          showVoiceIcon: true
+        };
+        launchGameViaAndroidHost(configData);
       } else {
-        msgEl.className = 'msg err';
-        msgEl.textContent = res ? res.error : 'Erreur de création.';
+        const msgEl = document.getElementById('joinPasswordMsg');
+        msgEl.className = 'msg-banner error';
+        msgEl.textContent = (res && res.error) ? res.error : 'Impossible de rejoindre le salon.';
       }
     });
   }
 
-  function doStartGame() {
-    const mapId = document.getElementById('startMapId').value;
-    const msgEl = document.getElementById('gameMsg');
+  // --- Action Créer Salon ---
+  function openCreateRoomModal() {
+    document.getElementById('createRoomMsg').className = 'msg-banner';
+    document.getElementById('createRoomModal').classList.add('active');
+  }
 
-    if (!socket) {
-      msgEl.className = 'msg err';
-      msgEl.textContent = 'Connecte-toi d\'abord (compte obligatoire).';
-      return;
-    }
+  function closeCreateRoomModal() {
+    document.getElementById('createRoomModal').classList.remove('active');
+  }
 
-    socket.emit('startGame', { mapId }, (res) => {
+  function handleCreateRoom(e) {
+    e.preventDefault();
+
+    const pseudo = getCurrentPseudo();
+    const roomName = document.getElementById('createRoomName').value.trim();
+    const mapId = document.getElementById('createMapId').value.trim();
+    const busId = document.getElementById('createBusId').value.trim();
+    const password = document.getElementById('createRoomPassword').value;
+    const maxPlayers = parseInt(document.getElementById('createMaxPlayers').value, 10) || 10;
+    const msgEl = document.getElementById('createRoomMsg');
+
+    socket.emit('createRoom', {
+      roomName: roomName,
+      mapId: mapId,
+      busId: busId,
+      isPrivate: Boolean(password),
+      password: password,
+      maxPlayers: maxPlayers,
+      pseudo: pseudo
+    }, (res) => {
       if (res && res.ok) {
-        msgEl.className = 'msg ok';
-        msgEl.textContent = `Partie lancée sur ${res.mapId} !`;
+        closeCreateRoomModal();
+        const createdRoom = res.room;
+        const configData = {
+          pseudo: pseudo,
+          roomId: createdRoom.id,
+          mapId: createdRoom.mapId,
+          busId: createdRoom.busId,
+          serverUrl: SERVER_URL,
+          showNameTag: true,
+          showVoiceIcon: true
+        };
+        launchGameViaAndroidHost(configData);
       } else {
-        msgEl.className = 'msg err';
-        msgEl.textContent = res ? res.error : 'Impossible de démarrer la partie.';
+        msgEl.className = 'msg-banner error';
+        msgEl.textContent = (res && res.error) ? res.error : 'Erreur lors de la création du salon.';
       }
     });
   }
