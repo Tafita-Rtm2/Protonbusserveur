@@ -117,6 +117,7 @@
   }
   .badge.priv { background: #3d1214; color: #f85149; }
   .badge.pub { background: #12331b; color: #3fb950; }
+  .hidden { display: none; }
   .logs {
     background: #0d1117;
     border: 1px solid var(--border);
@@ -184,43 +185,64 @@
 
     <div class="panel" style="margin-top: 16px;">
       <h2>🏠 Créer / Rejoindre une Room</h2>
-      <label for="roomName">Nom du Salon (roomName)</label>
-      <input id="roomName" placeholder="Salon Tana Express" value="Salon Tana Express" />
 
-      <div class="row-2">
-        <div>
-          <label for="mapId">Map ID</label>
-          <input id="mapId" value="map_tana" />
-        </div>
-        <div>
-          <label for="busId">Bus ID</label>
-          <input id="busId" value="bus_default" />
-        </div>
+      <div id="roomPanelLocked">
+        <p style="color:var(--muted); font-size:0.85rem;">
+          🔒 Compte obligatoire — crée un compte ou connecte-toi ci-dessus pour
+          pouvoir créer ou rejoindre une room.
+        </p>
       </div>
 
-      <div class="row-2">
-        <div>
-          <label for="isPrivate">Accès</label>
-          <select id="isPrivate" onchange="toggleRoomPassword()">
-            <option value="false">Publique</option>
-            <option value="true">Privée (Mot de passe)</option>
-          </select>
-        </div>
-        <div>
-          <label for="roomPassword">Mot de passe Room</label>
-          <input id="roomPassword" type="password" placeholder="optionnel" disabled />
-        </div>
-      </div>
+      <div id="roomPanelContent" class="hidden">
+        <p style="color:var(--accent2); font-size:0.8rem; margin:0 0 8px;">
+          Connecté en tant que <b id="connectedAs"></b>
+        </p>
 
-      <button onclick="doCreateRoom()">Créer la Room (Socket.io)</button>
-      <div id="roomMsg" class="msg"></div>
+        <label for="roomName">Nom du Salon (roomName)</label>
+        <input id="roomName" placeholder="Salon Tana Express" value="Salon Tana Express" />
+
+        <div class="row-2">
+          <div>
+            <label for="mapId">Map ID</label>
+            <input id="mapId" value="map_tana" />
+          </div>
+          <div>
+            <label for="busId">Bus ID</label>
+            <input id="busId" value="bus_default" />
+          </div>
+        </div>
+
+        <div class="row-2">
+          <div>
+            <label for="isPrivate">Accès</label>
+            <select id="isPrivate" onchange="toggleRoomPassword()">
+              <option value="false">Publique</option>
+              <option value="true">Privée (Mot de passe)</option>
+            </select>
+          </div>
+          <div>
+            <label for="roomPassword">Mot de passe Room</label>
+            <input id="roomPassword" type="password" placeholder="optionnel" disabled />
+          </div>
+        </div>
+
+        <button onclick="doCreateRoom()">Créer la Room (Socket.io)</button>
+        <div id="roomMsg" class="msg"></div>
+      </div>
     </div>
   </div>
 
 </div>
 
 <script>
-  const socket = io({ transports: ['websocket', 'polling'] });
+  let socket = null;
+  let authToken = null;
+
+  function connectAuthenticatedSocket(token) {
+    if (socket) socket.disconnect();
+    socket = io({ transports: ['websocket', 'polling'], auth: { token } });
+    attachSocketHandlers();
+  }
 
   function logEvent(text) {
     const logs = document.getElementById('eventLogs');
@@ -263,17 +285,19 @@
     }[c]));
   }
 
-  socket.on('connect', () => logEvent(`Socket connecté (id: ${socket.id})`));
-  socket.on('disconnect', () => logEvent('Socket déconnecté'));
-  socket.on('roomList', (list) => {
-    renderRooms(list);
-    logEvent(`Mise à jour des rooms (${list.length} active(s))`);
-  });
+  function attachSocketHandlers() {
+    socket.on('connect', () => logEvent(`Socket connecté (id: ${socket.id})`));
+    socket.on('disconnect', () => logEvent('Socket déconnecté'));
+    socket.on('roomList', (list) => {
+      renderRooms(list);
+      logEvent(`Mise à jour des rooms (${list.length} active(s))`);
+    });
 
-  socket.on('playerJoined', (data) => logEvent(`Joueur rejoint: ${data.username || data.pseudo}`));
-  socket.on('playerLeft', (data) => logEvent(`Joueur parti: ${data.username || data.pseudo}`));
-  socket.on('hostChanged', (data) => logEvent(`Nouvel hôte attribué: ${data.newHostUsername} (${data.newHostId})`));
-  socket.on('GAME_STARTED', (data) => logEvent(`🚀 GAME_STARTED reçu ! Map = ${data.mapId}`));
+    socket.on('playerJoined', (data) => logEvent(`Joueur rejoint: ${data.username || data.pseudo}`));
+    socket.on('playerLeft', (data) => logEvent(`Joueur parti: ${data.username || data.pseudo}`));
+    socket.on('hostChanged', (data) => logEvent(`Nouvel hôte attribué: ${data.newHostUsername} (${data.newHostId})`));
+    socket.on('GAME_STARTED', (data) => logEvent(`🚀 GAME_STARTED reçu ! Map = ${data.mapId}`));
+  }
 
   async function refreshStats() {
     try {
@@ -308,21 +332,36 @@
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Erreur inconnue');
       msgEl.className = 'msg ok';
-      msgEl.textContent = `${successMsg} Token: ${data.token.slice(0, 20)}...`;
+      msgEl.textContent = `${successMsg} Connecté en tant que ${data.user.username}.`;
       logEvent(`REST: ${successMsg} (${username})`);
+
+      authToken = data.token;
+      connectAuthenticatedSocket(authToken);
+      unlockRoomPanel(data.user.username);
     } catch (err) {
       msgEl.className = 'msg err';
       msgEl.textContent = err.message;
     }
   }
 
+  function unlockRoomPanel(username) {
+    document.getElementById('roomPanelLocked').classList.add('hidden');
+    document.getElementById('roomPanelContent').classList.remove('hidden');
+    document.getElementById('connectedAs').textContent = username;
+  }
+
   function doCreateRoom() {
+    if (!socket) {
+      document.getElementById('roomMsg').className = 'msg err';
+      document.getElementById('roomMsg').textContent = 'Connecte-toi d\'abord (compte obligatoire).';
+      return;
+    }
+
     const roomName = document.getElementById('roomName').value;
     const mapId = document.getElementById('mapId').value;
     const busId = document.getElementById('busId').value;
     const isPrivate = document.getElementById('isPrivate').value === 'true';
     const password = document.getElementById('roomPassword').value;
-    const username = document.getElementById('username').value.trim() || 'Hôte_Test';
     const msgEl = document.getElementById('roomMsg');
 
     socket.emit('createRoom', {
@@ -331,7 +370,6 @@
       busId,
       isPrivate,
       password,
-      username,
     }, (res) => {
       if (res && res.ok) {
         msgEl.className = 'msg ok';
@@ -347,6 +385,12 @@
   function doStartGame() {
     const mapId = document.getElementById('startMapId').value;
     const msgEl = document.getElementById('gameMsg');
+
+    if (!socket) {
+      msgEl.className = 'msg err';
+      msgEl.textContent = 'Connecte-toi d\'abord (compte obligatoire).';
+      return;
+    }
 
     socket.emit('startGame', { mapId }, (res) => {
       if (res && res.ok) {
