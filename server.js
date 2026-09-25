@@ -300,22 +300,10 @@ io.on('connection', (socket) => {
     try {
       const ack = typeof callback === 'function' ? callback : () => {};
 
-      // Compte obligatoire : impossible de créer une room sans être authentifié
-      // (token JWT valide fourni à la connexion Socket.io). Ce contrôle est
-      // fait ICI, côté serveur — pas seulement caché dans le dashboard — donc
-      // aucun client (dashboard, launcher, mod du jeu) ne peut le contourner.
-      if (!socket.user) {
-        return ack({
-          ok: false,
-          error: 'Compte requis : connecte-toi (POST /api/login) avant de créer une room.',
-          code: 'AUTH_REQUIRED',
-        });
-      }
+      const { roomName, name, isPrivate, password, mapId, busId, maxPlayers, username: reqUsername, pseudo: reqPseudo } = payload || {};
 
-      const { roomName, name, isPrivate, password, mapId, busId, maxPlayers } = payload || {};
-      // Le pseudo vient du compte authentifié, jamais du payload client
-      // (évite qu'un joueur usurpe le pseudo d'un autre en le tapant en dur).
-      const username = socket.user.username || socket.user.pseudo;
+      const rawPseudo = socket.user?.username || socket.user?.pseudo || reqPseudo || reqUsername || 'JoueurAnonyme';
+      const username = String(rawPseudo).trim().slice(0, 24);
       const pseudo = username;
 
       const finalRoomName = String(roomName || name || '').trim();
@@ -375,14 +363,6 @@ io.on('connection', (socket) => {
   socket.on('joinRoom', (payload, callback) => {
     const ack = typeof callback === 'function' ? callback : () => {};
     try {
-      if (!socket.user) {
-        return ack({
-          ok: false,
-          error: 'Compte requis : connecte-toi (POST /api/login) avant de rejoindre une room.',
-          code: 'AUTH_REQUIRED',
-        });
-      }
-
       const { roomId } = payload || {};
       if (!roomId) return ack({ ok: false, error: 'roomId requis.' });
 
