@@ -298,8 +298,25 @@ io.on('connection', (socket) => {
   // payload: { roomName, name, isPrivate, password, mapId, busId, maxPlayers, username, pseudo }
   socket.on('createRoom', (payload, callback) => {
     try {
-      const { roomName, name, isPrivate, password, mapId, busId, maxPlayers, username, pseudo } = payload || {};
       const ack = typeof callback === 'function' ? callback : () => {};
+
+      // Compte obligatoire : impossible de créer une room sans être authentifié
+      // (token JWT valide fourni à la connexion Socket.io). Ce contrôle est
+      // fait ICI, côté serveur — pas seulement caché dans le dashboard — donc
+      // aucun client (dashboard, launcher, mod du jeu) ne peut le contourner.
+      if (!socket.user) {
+        return ack({
+          ok: false,
+          error: 'Compte requis : connecte-toi (POST /api/login) avant de créer une room.',
+          code: 'AUTH_REQUIRED',
+        });
+      }
+
+      const { roomName, name, isPrivate, password, mapId, busId, maxPlayers } = payload || {};
+      // Le pseudo vient du compte authentifié, jamais du payload client
+      // (évite qu'un joueur usurpe le pseudo d'un autre en le tapant en dur).
+      const username = socket.user.username || socket.user.pseudo;
+      const pseudo = username;
 
       const finalRoomName = String(roomName || name || '').trim();
       const finalMapId = String(mapId || 'map_tana').trim();
@@ -358,6 +375,14 @@ io.on('connection', (socket) => {
   socket.on('joinRoom', (payload, callback) => {
     const ack = typeof callback === 'function' ? callback : () => {};
     try {
+      if (!socket.user) {
+        return ack({
+          ok: false,
+          error: 'Compte requis : connecte-toi (POST /api/login) avant de rejoindre une room.',
+          code: 'AUTH_REQUIRED',
+        });
+      }
+
       const { roomId } = payload || {};
       if (!roomId) return ack({ ok: false, error: 'roomId requis.' });
 
@@ -396,7 +421,9 @@ io.on('connection', (socket) => {
       }
     }
 
-    // Si mapId et busId sont fournis par le client, vérification de compatibilité
+    // Vérification stricte de compatibilité map ET bus (les deux doivent
+    // correspondre exactement à ce qu'attend la room, sinon les joueurs ne
+    // verraient pas les mêmes véhicules/décors).
     if (mapId && String(mapId) !== room.mapId) {
       return {
         ok: false,
@@ -404,8 +431,19 @@ io.on('connection', (socket) => {
         code: 'MAP_MISMATCH',
       };
     }
+    if (busId && String(busId) !== room.busId) {
+      return {
+        ok: false,
+        error: `Incompatibilité de bus : la room exige busId="${room.busId}".`,
+        code: 'BUS_MISMATCH',
+      };
+    }
 
-    const finalUsername = String(username || pseudo || sock.user?.username || sock.user?.pseudo || `Joueur_${sock.id.slice(0, 5)}`)
+    // L'identité authentifiée est TOUJOURS prioritaire sur ce que le client
+    // prétend envoyer dans le payload — évite qu'un joueur usurpe le pseudo
+    // d'un autre. Le payload ne sert de secours que si, un jour, un client
+    // se connecte sans compte (actuellement bloqué en amont pour create/join).
+    const finalUsername = String(sock.user?.username || sock.user?.pseudo || username || pseudo || `Joueur_${sock.id.slice(0, 5)}`)
       .trim()
       .slice(0, 24);
 
