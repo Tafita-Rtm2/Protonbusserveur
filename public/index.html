@@ -403,6 +403,7 @@
   <div class="user-bar">
     <label for="playerPseudo">👤 Joueur :</label>
     <input id="playerPseudo" placeholder="Ton pseudo..." />
+    <button class="btn btn-secondary btn-sm" id="viewLogsBtn" onclick="openLogsModal()" style="display:none;">📋 Voir les logs</button>
   </div>
 </header>
 
@@ -510,6 +511,26 @@
   </div>
 </div>
 
+<!-- Modal Logs natifs (sans PC/adb) -->
+<div id="logsModal" class="modal-overlay">
+  <div class="modal" style="max-width: 700px;">
+    <div class="modal-header">
+      <div class="modal-title">📋 Logs de synchronisation (APK)</div>
+      <button class="close-btn" onclick="closeLogsModal()">&times;</button>
+    </div>
+    <p style="font-size:13px; opacity:0.8; margin-top:0;">
+      Ceci remplace adb/PC : les logs du mod natif s'affichent ici directement. Laisse cette fenêtre ouverte pendant que tu crées/rejoins un salon, elle se rafraîchit automatiquement.
+    </p>
+    <textarea id="logsContent" readonly style="width:100%; height:320px; font-family:monospace; font-size:12px; background:#0b0e14; color:#8be08b; border:1px solid #333; border-radius:6px; padding:8px; white-space:pre-wrap;"></textarea>
+    <div id="logsCopyMsg" class="msg-banner" style="display:none;"></div>
+    <div class="modal-actions">
+      <button type="button" class="btn btn-secondary" onclick="clearLogsFromApk()">🗑️ Effacer</button>
+      <button type="button" class="btn btn-secondary" onclick="copyLogsToClipboard()">📎 Copier</button>
+      <button type="button" class="btn btn-primary" onclick="closeLogsModal()">Fermer</button>
+    </div>
+  </div>
+</div>
+
 <footer>
   Proton Bus Simulator — Serveur Multijoueur | <a href="/admin.html">Dashboard Admin</a>
 </footer>
@@ -540,6 +561,68 @@
   const isAndroidHostAvailable = Boolean(window.AndroidHost && typeof window.AndroidHost.launchGame === 'function');
   if (!isAndroidHostAvailable) {
     document.getElementById('noAndroidHostBanner').style.display = 'flex';
+  }
+
+  // --- Logs natifs sans PC/adb (bouton "Voir les logs") ---
+  const isGetLogsAvailable = Boolean(window.AndroidHost && typeof window.AndroidHost.getLogs === 'function');
+  let logsRefreshTimer = null;
+
+  if (isGetLogsAvailable) {
+    document.getElementById('viewLogsBtn').style.display = 'inline-block';
+  }
+
+  function refreshLogsContent() {
+    try {
+      const box = document.getElementById('logsContent');
+      const text = window.AndroidHost.getLogs();
+      const wasAtBottom = (box.scrollTop + box.clientHeight) >= (box.scrollHeight - 20);
+      box.value = text || '';
+      if (wasAtBottom) box.scrollTop = box.scrollHeight;
+    } catch (e) {
+      console.warn('Erreur lecture logs :', e);
+    }
+  }
+
+  function openLogsModal() {
+    if (!isGetLogsAvailable) return;
+    document.getElementById('logsModal').classList.add('active');
+    refreshLogsContent();
+    if (logsRefreshTimer) clearInterval(logsRefreshTimer);
+    logsRefreshTimer = setInterval(refreshLogsContent, 2000);
+  }
+
+  function closeLogsModal() {
+    document.getElementById('logsModal').classList.remove('active');
+    if (logsRefreshTimer) {
+      clearInterval(logsRefreshTimer);
+      logsRefreshTimer = null;
+    }
+  }
+
+  function clearLogsFromApk() {
+    try {
+      if (window.AndroidHost && typeof window.AndroidHost.clearLogs === 'function') {
+        window.AndroidHost.clearLogs();
+      }
+      refreshLogsContent();
+    } catch (e) {
+      console.warn('Erreur effacement logs :', e);
+    }
+  }
+
+  function copyLogsToClipboard() {
+    const box = document.getElementById('logsContent');
+    const msg = document.getElementById('logsCopyMsg');
+    try {
+      box.select();
+      box.setSelectionRange(0, 999999);
+      document.execCommand('copy');
+      msg.textContent = '✅ Logs copiés dans le presse-papiers.';
+    } catch (e) {
+      msg.textContent = '⚠️ Copie automatique impossible, sélectionne le texte manuellement.';
+    }
+    msg.style.display = 'block';
+    setTimeout(() => { msg.style.display = 'none'; }, 3000);
   }
 
   // --- Connexion Socket.io ---
