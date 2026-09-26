@@ -607,8 +607,11 @@
 
     if (window.AndroidHost && typeof window.AndroidHost.launchGame === 'function') {
       window.AndroidHost.launchGame(JSON.stringify(configData));
+    } else if (window.ProtonSync && typeof window.ProtonSync.setUserData === 'function') {
+      console.warn('AndroidHost.launchGame non disponible. Fallback vers ProtonSync.setUserData (ancien Launcher).');
+      window.ProtonSync.setUserData(configData.pseudo, configData.roomId, configData.mapId, configData.busId);
     } else {
-      console.warn('AndroidHost.launchGame non disponible. Fallback navigateur.');
+      console.warn('Aucune interface native disponible (ni AndroidHost, ni ProtonSync). Fallback navigateur.');
       alert("Ouvrez cette page depuis l'application Launcher Proton Bus Sync pour lancer le jeu.\n\nConfiguration :\n" + JSON.stringify(configData, null, 2));
     }
   }
