@@ -1,11 +1,11 @@
 === git remote add ===
 === git ls-remote AVANT push ===
-7fe48bbadfd9524158c819b455c6935ccda2fa4b	refs/heads/main
+a6a377376c0dc227f8c1cb2f42bbf013f7a73fca	refs/heads/main
 === git push ===
 To https://huggingface.co/spaces/Tafitaniaina/TVserveur
-   7fe48bb..a6a3773  main -> main
+   a6a3773..14a07fb  main -> main
 PUSH_EXIT=0
 === git ls-remote APRES push ===
-a6a377376c0dc227f8c1cb2f42bbf013f7a73fca	refs/heads/main
+14a07fb0d763ab18a08585361395130fa9c8e2fb	refs/heads/main
 === HEAD local ===
-a6a377376c0dc227f8c1cb2f42bbf013f7a73fca
+14a07fb0d763ab18a08585361395130fa9c8e2fb
