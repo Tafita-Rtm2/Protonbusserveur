@@ -1,0 +1,408 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Proton Bus Simulator — Serveur Multijoueur</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.5/socket.io.min.js"></script>
+<style>
+  :root {
+    --bg: #0d1117;
+    --panel: #161b22;
+    --border: #30363d;
+    --text: #e6edf3;
+    --muted: #8b949e;
+    --accent: #ffb300;
+    --accent2: #3fb950;
+    --danger: #f85149;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    padding: 20px;
+  }
+  h1 { font-size: 1.4rem; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 20px; font-size: 0.9rem; }
+  .grid {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 16px;
+    max-width: 1100px;
+    margin: 0 auto;
+  }
+  @media (min-width: 820px) {
+    .grid { grid-template-columns: 1.3fr 1fr; }
+  }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px;
+  }
+  .panel h2 {
+    margin: 0 0 12px;
+    font-size: 1rem;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--accent2);
+    box-shadow: 0 0 6px var(--accent2);
+  }
+  .stats { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
+  .stat {
+    background: #0d1117;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 8px 12px;
+    flex: 1;
+    min-width: 90px;
+    text-align: center;
+  }
+  .stat b { display: block; font-size: 1.3rem; color: var(--accent); }
+  .stat span { font-size: 0.7rem; color: var(--muted); text-transform: uppercase; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+  th, td { text-align: left; padding: 6px 4px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 500; }
+  .empty { color: var(--muted); font-style: italic; padding: 8px 0; }
+  label { display: block; font-size: 0.8rem; color: var(--muted); margin: 8px 0 3px; }
+  input, select {
+    width: 100%;
+    padding: 8px 10px;
+    background: #0d1117;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    font-size: 0.9rem;
+  }
+  .row-2 { display: flex; gap: 8px; }
+  .row-2 > div { flex: 1; }
+  button {
+    margin-top: 10px;
+    width: 100%;
+    padding: 9px;
+    border: none;
+    border-radius: 6px;
+    background: var(--accent);
+    color: #1a1a1a;
+    font-weight: 600;
+    cursor: pointer;
+    font-size: 0.88rem;
+  }
+  button.secondary {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text);
+    margin-top: 6px;
+  }
+  button.green {
+    background: var(--accent2);
+    color: #000;
+  }
+  .msg { margin-top: 8px; font-size: 0.82rem; min-height: 1.2em; word-break: break-all; }
+  .msg.ok { color: var(--accent2); }
+  .msg.err { color: var(--danger); }
+  .badge {
+    display: inline-block;
+    font-size: 0.7rem;
+    padding: 1px 6px;
+    border-radius: 4px;
+    background: #21262d;
+    color: var(--muted);
+  }
+  .badge.priv { background: #3d1214; color: #f85149; }
+  .badge.pub { background: #12331b; color: #3fb950; }
+  .hidden { display: none; }
+  .logs {
+    background: #0d1117;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px;
+    font-family: monospace;
+    font-size: 0.75rem;
+    height: 120px;
+    overflow-y: auto;
+    color: var(--muted);
+    margin-top: 10px;
+  }
+</style>
+</head>
+<body>
+
+<h1>🚌 Proton Bus Simulator — Dashboard Serveur</h1>
+<p class="sub">Gestion des comptes, création de rooms publiques/privées, choix des cartes & Start Game.</p>
+
+<div class="grid">
+
+  <div class="panel">
+    <h2><span class="dot"></span> Salles en direct</h2>
+    <div class="stats">
+      <div class="stat"><b id="statRooms">0</b><span>Rooms</span></div>
+      <div class="stat"><b id="statPlayers">0</b><span>Joueurs</span></div>
+      <div class="stat"><b id="statSockets">0</b><span>Connexions</span></div>
+    </div>
+    <table>
+      <thead>
+        <tr><th>Room</th><th>Map / Bus</th><th>Accès</th><th>Joueurs</th></tr>
+      </thead>
+      <tbody id="roomsBody">
+        <tr><td colspan="4" class="empty">Aucune room active pour le moment.</td></tr>
+      </tbody>
+    </table>
+
+    <h2 style="margin-top: 16px;">🎮 Tester Start Game</h2>
+    <div class="row-2">
+      <div>
+        <label for="startMapId">Map ID</label>
+        <input id="startMapId" value="map_tana" />
+      </div>
+      <div>
+        <label>&nbsp;</label>
+        <button class="green" onclick="doStartGame()">▶ Démarrer la partie (Host)</button>
+      </div>
+    </div>
+    <div id="gameMsg" class="msg"></div>
+
+    <div class="logs" id="eventLogs">[Logs événements Socket.io...]</div>
+  </div>
+
+  <div>
+    <div class="panel">
+      <h2>🔐 Authentification (Comptes)</h2>
+      <label for="username">Username / Pseudo</label>
+      <input id="username" placeholder="ex: Miantavola" />
+      <label for="password">Mot de passe</label>
+      <input id="password" type="password" placeholder="••••••••" />
+      <button onclick="doRegister()">Créer un compte (POST /api/register)</button>
+      <button class="secondary" onclick="doLogin()">Se connecter (POST /api/login)</button>
+      <div id="authMsg" class="msg"></div>
+    </div>
+
+    <div class="panel" style="margin-top: 16px;">
+      <h2>🏠 Créer / Rejoindre une Room</h2>
+
+      <div id="roomPanelLocked">
+        <p style="color:var(--muted); font-size:0.85rem;">
+          🔒 Compte obligatoire — crée un compte ou connecte-toi ci-dessus pour
+          pouvoir créer ou rejoindre une room.
+        </p>
+      </div>
+
+      <div id="roomPanelContent" class="hidden">
+        <p style="color:var(--accent2); font-size:0.8rem; margin:0 0 8px;">
+          Connecté en tant que <b id="connectedAs"></b>
+        </p>
+
+        <label for="roomName">Nom du Salon (roomName)</label>
+        <input id="roomName" placeholder="Salon Tana Express" value="Salon Tana Express" />
+
+        <div class="row-2">
+          <div>
+            <label for="mapId">Map ID</label>
+            <input id="mapId" value="map_tana" />
+          </div>
+          <div>
+            <label for="busId">Bus ID</label>
+            <input id="busId" value="bus_default" />
+          </div>
+        </div>
+
+        <div class="row-2">
+          <div>
+            <label for="isPrivate">Accès</label>
+            <select id="isPrivate" onchange="toggleRoomPassword()">
+              <option value="false">Publique</option>
+              <option value="true">Privée (Mot de passe)</option>
+            </select>
+          </div>
+          <div>
+            <label for="roomPassword">Mot de passe Room</label>
+            <input id="roomPassword" type="password" placeholder="optionnel" disabled />
+          </div>
+        </div>
+
+        <button onclick="doCreateRoom()">Créer la Room (Socket.io)</button>
+        <div id="roomMsg" class="msg"></div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+  let socket = null;
+  let authToken = null;
+
+  function connectAuthenticatedSocket(token) {
+    if (socket) socket.disconnect();
+    socket = io({ transports: ['websocket', 'polling'], auth: { token } });
+    attachSocketHandlers();
+  }
+
+  function logEvent(text) {
+    const logs = document.getElementById('eventLogs');
+    const time = new Date().toLocaleTimeString();
+    logs.innerHTML += `<div>[${time}] ${escapeHtml(text)}</div>`;
+    logs.scrollTop = logs.scrollHeight;
+  }
+
+  function toggleRoomPassword() {
+    const isPriv = document.getElementById('isPrivate').value === 'true';
+    const pwdInput = document.getElementById('roomPassword');
+    pwdInput.disabled = !isPriv;
+    if (!isPriv) pwdInput.value = '';
+  }
+
+  function renderRooms(rooms) {
+    const body = document.getElementById('roomsBody');
+    document.getElementById('statRooms').textContent = rooms.length;
+    const totalPlayers = rooms.reduce((s, r) => s + r.playerCount, 0);
+    document.getElementById('statPlayers').textContent = totalPlayers;
+
+    if (!rooms.length) {
+      body.innerHTML = '<tr><td colspan="4" class="empty">Aucune room active pour le moment.</td></tr>';
+      return;
+    }
+
+    body.innerHTML = rooms.map(r => `
+      <tr>
+        <td><b>${escapeHtml(r.roomName || r.name)}</b></td>
+        <td>${escapeHtml(r.mapId)} / ${escapeHtml(r.busId)}</td>
+        <td>${r.isPrivate ? '<span class="badge priv">Privée 🔒</span>' : '<span class="badge pub">Publique</span>'}</td>
+        <td>${r.playerCount} / ${r.maxPlayers}</td>
+      </tr>
+    `).join('');
+  }
+
+  function escapeHtml(str) {
+    return String(str || '').replace(/[&<>"']/g, c => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+    }[c]));
+  }
+
+  function attachSocketHandlers() {
+    socket.on('connect', () => logEvent(`Socket connecté (id: ${socket.id})`));
+    socket.on('disconnect', () => logEvent('Socket déconnecté'));
+    socket.on('roomList', (list) => {
+      renderRooms(list);
+      logEvent(`Mise à jour des rooms (${list.length} active(s))`);
+    });
+
+    socket.on('playerJoined', (data) => logEvent(`Joueur rejoint: ${data.username || data.pseudo}`));
+    socket.on('playerLeft', (data) => logEvent(`Joueur parti: ${data.username || data.pseudo}`));
+    socket.on('hostChanged', (data) => logEvent(`Nouvel hôte attribué: ${data.newHostUsername} (${data.newHostId})`));
+    socket.on('GAME_STARTED', (data) => logEvent(`🚀 GAME_STARTED reçu ! Map = ${data.mapId}`));
+  }
+
+  async function refreshStats() {
+    try {
+      const res = await fetch('/api/stats');
+      const data = await res.json();
+      document.getElementById('statSockets').textContent = data.connectedSockets;
+    } catch (e) { /* silencieux */ }
+  }
+  setInterval(refreshStats, 4000);
+  refreshStats();
+
+  async function doRegister() {
+    await authRequest('/api/register', 'Compte créé avec succès !');
+  }
+  async function doLogin() {
+    await authRequest('/api/login', 'Connexion réussie !');
+  }
+
+  async function authRequest(endpoint, successMsg) {
+    const username = document.getElementById('username').value.trim();
+    const password = document.getElementById('password').value;
+    const msgEl = document.getElementById('authMsg');
+    msgEl.className = 'msg';
+    msgEl.textContent = 'Envoi en cours...';
+
+    try {
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, pseudo: username, password }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Erreur inconnue');
+      msgEl.className = 'msg ok';
+      msgEl.textContent = `${successMsg} Connecté en tant que ${data.user.username}.`;
+      logEvent(`REST: ${successMsg} (${username})`);
+
+      authToken = data.token;
+      connectAuthenticatedSocket(authToken);
+      unlockRoomPanel(data.user.username);
+    } catch (err) {
+      msgEl.className = 'msg err';
+      msgEl.textContent = err.message;
+    }
+  }
+
+  function unlockRoomPanel(username) {
+    document.getElementById('roomPanelLocked').classList.add('hidden');
+    document.getElementById('roomPanelContent').classList.remove('hidden');
+    document.getElementById('connectedAs').textContent = username;
+  }
+
+  function doCreateRoom() {
+    if (!socket) {
+      document.getElementById('roomMsg').className = 'msg err';
+      document.getElementById('roomMsg').textContent = 'Connecte-toi d\'abord (compte obligatoire).';
+      return;
+    }
+
+    const roomName = document.getElementById('roomName').value;
+    const mapId = document.getElementById('mapId').value;
+    const busId = document.getElementById('busId').value;
+    const isPrivate = document.getElementById('isPrivate').value === 'true';
+    const password = document.getElementById('roomPassword').value;
+    const msgEl = document.getElementById('roomMsg');
+
+    socket.emit('createRoom', {
+      roomName,
+      mapId,
+      busId,
+      isPrivate,
+      password,
+    }, (res) => {
+      if (res && res.ok) {
+        msgEl.className = 'msg ok';
+        msgEl.textContent = `Room "${res.room.roomName}" créée avec succès ! ID: ${res.room.id}`;
+        logEvent(`Room créée: ${res.room.roomName} (${res.room.isPrivate ? 'Privée' : 'Publique'})`);
+      } else {
+        msgEl.className = 'msg err';
+        msgEl.textContent = res ? res.error : 'Erreur de création.';
+      }
+    });
+  }
+
+  function doStartGame() {
+    const mapId = document.getElementById('startMapId').value;
+    const msgEl = document.getElementById('gameMsg');
+
+    if (!socket) {
+      msgEl.className = 'msg err';
+      msgEl.textContent = 'Connecte-toi d\'abord (compte obligatoire).';
+      return;
+    }
+
+    socket.emit('startGame', { mapId }, (res) => {
+      if (res && res.ok) {
+        msgEl.className = 'msg ok';
+        msgEl.textContent = `Partie lancée sur ${res.mapId} !`;
+      } else {
+        msgEl.className = 'msg err';
+        msgEl.textContent = res ? res.error : 'Impossible de démarrer la partie.';
+      }
+    });
+  }
+</script>
+
+</body>
+</html>
