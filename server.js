@@ -383,6 +383,16 @@ io.on('connection', (socket) => {
     }
   });
 
+  const BUS_INFO_KEYS = ['busName', 'busEntry', 'busModType', 'busFile', 'busDir', 'busObj', 'skinBus', 'skinTex', 'skinPath'];
+  function cleanBusInfo(bi) {
+    if (!bi || typeof bi !== 'object') return null;
+    const out = {};
+    for (const k of BUS_INFO_KEYS) {
+      if (bi[k] !== undefined && bi[k] !== null) out[k] = String(bi[k]).slice(0, 160);
+    }
+    return Object.keys(out).length ? out : null;
+  }
+
   /**
    * Logique interne partagée par createRoom/joinRoom.
    */
@@ -459,6 +469,7 @@ io.on('connection', (socket) => {
           username: p.username,
           pseudo: p.pseudo,
           transform: p.transform,
+          busInfo: p.busInfo || null,
         })),
     });
 
@@ -574,6 +585,9 @@ io.on('connection', (socket) => {
 
     if (!payload || typeof payload !== 'object') return;
     const { position, rotation, controls } = payload;
+    // Identité du bus (modèle + skin) annoncée par le client : nettoyée puis mémorisée
+    const cleanedBusInfo = cleanBusInfo(payload.busInfo);
+    if (cleanedBusInfo) player.busInfo = cleanedBusInfo;
     if (!position || !rotation) return; // position et rotation obligatoires
 
     // Normalisation des commandes (embrayage/frein/accélérateur/direction)
@@ -630,6 +644,8 @@ io.on('connection', (socket) => {
       showNameTag,
       showVoiceIcon,
       transform,
+      // Relayé uniquement quand le client l'a envoyé (toutes les ~3 s) pour économiser la bande passante
+      ...(cleanedBusInfo ? { busInfo: cleanedBusInfo } : {}),
     });
   });
 
