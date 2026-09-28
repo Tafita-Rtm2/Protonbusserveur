@@ -249,19 +249,27 @@ app.get('/api/stats', (req, res) => {
   });
 });
 
+// Page d'accueil = flux compte + rooms (creation de compte -> connexion ->
+// liste des rooms avec bouton Rejoindre -> creation de room), exactement le
+// meme fichier que celui charge par le Launcher Android. Il n'existe PLUS de
+// page d'administration/dashboard separee accessible publiquement.
+app.get('/', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'launcher.html'));
+});
+
 // Route explicite pour le Launcher Android (MainActivity.kt charge
 // ".../launcher" sans extension .html — express.static ne sert que le nom de
 // fichier exact "launcher.html", donc sans cette route, /launcher tombait
-// dans le fallback ci-dessous et affichait le dashboard au lieu du vrai
-// launcher. C'était la cause du bug "chacun crée sa propre room".
+// dans le fallback ci-dessous).
 app.get('/launcher', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'launcher.html'));
 });
 
-// Fallback : sert le dashboard pour toute route inconnue en GET (SPA-friendly)
+// Fallback : toute route inconnue en GET renvoie le meme flux (SPA-friendly).
+// Il n'y a plus de page d'admin a exposer ici.
 app.get('*', (req, res, next) => {
   if (req.path.startsWith('/api/')) return next();
-  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+  res.sendFile(path.join(__dirname, 'public', 'launcher.html'));
 });
 
 // ------------------------------------------------------------------
