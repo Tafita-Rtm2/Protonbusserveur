@@ -249,6 +249,15 @@ app.get('/api/stats', (req, res) => {
   });
 });
 
+// Route explicite pour le Launcher Android (MainActivity.kt charge
+// ".../launcher" sans extension .html — express.static ne sert que le nom de
+// fichier exact "launcher.html", donc sans cette route, /launcher tombait
+// dans le fallback ci-dessous et affichait le dashboard au lieu du vrai
+// launcher. C'était la cause du bug "chacun crée sa propre room".
+app.get('/launcher', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'launcher.html'));
+});
+
 // Fallback : sert le dashboard pour toute route inconnue en GET (SPA-friendly)
 app.get('*', (req, res, next) => {
   if (req.path.startsWith('/api/')) return next();
@@ -300,10 +309,22 @@ io.on('connection', (socket) => {
     try {
       const ack = typeof callback === 'function' ? callback : () => {};
 
-      const { roomName, name, isPrivate, password, mapId, busId, maxPlayers, username: reqUsername, pseudo: reqPseudo } = payload || {};
+      // Compte obligatoire : impossible de créer une room sans être authentifié
+      // (token JWT valide fourni à la connexion Socket.io). Ce contrôle est
+      // fait ICI, côté serveur — pas seulement caché dans le dashboard — donc
+      // aucun client (dashboard, launcher, mod du jeu) ne peut le contourner.
+      if (!socket.user) {
+        return ack({
+          ok: false,
+          error: 'Compte requis : connecte-toi (POST /api/login) avant de créer une room.',
+          code: 'AUTH_REQUIRED',
+        });
+      }
 
-      const rawPseudo = socket.user?.username || socket.user?.pseudo || reqPseudo || reqUsername || 'JoueurAnonyme';
-      const username = String(rawPseudo).trim().slice(0, 24);
+      const { roomName, name, isPrivate, password, mapId, busId, maxPlayers } = payload || {};
+      // Le pseudo vient du compte authentifié, jamais du payload client
+      // (évite qu'un joueur usurpe le pseudo d'un autre en le tapant en dur).
+      const username = socket.user.username || socket.user.pseudo;
       const pseudo = username;
 
       const finalRoomName = String(roomName || name || '').trim();
@@ -363,6 +384,14 @@ io.on('connection', (socket) => {
   socket.on('joinRoom', (payload, callback) => {
     const ack = typeof callback === 'function' ? callback : () => {};
     try {
+      if (!socket.user) {
+        return ack({
+          ok: false,
+          error: 'Compte requis : connecte-toi (POST /api/login) avant de rejoindre une room.',
+          code: 'AUTH_REQUIRED',
+        });
+      }
+
       const { roomId } = payload || {};
       if (!roomId) return ack({ ok: false, error: 'roomId requis.' });
 
@@ -383,20 +412,10 @@ io.on('connection', (socket) => {
     }
   });
 
-  const BUS_INFO_KEYS = ['busName', 'busEntry', 'busModType', 'busFile', 'busDir', 'busObj', 'skinBus', 'skinTex', 'skinPath'];
-  function cleanBusInfo(bi) {
-    if (!bi || typeof bi !== 'object') return null;
-    const out = {};
-    for (const k of BUS_INFO_KEYS) {
-      if (bi[k] !== undefined && bi[k] !== null) out[k] = String(bi[k]).slice(0, 160);
-    }
-    return Object.keys(out).length ? out : null;
-  }
-
   /**
    * Logique interne partagée par createRoom/joinRoom.
    */
-  function joinRoomInternal(sock, roomId, { password, mapId, busId, username, pseudo }) {
+  function joinRoomInternal(sock, roomId, { password, mapId, busId, username, pseudo, vehicleId, skinId }) {
     const room = rooms.get(roomId);
     if (!room) return { ok: false, error: 'Room introuvable.' };
 
@@ -444,6 +463,10 @@ io.on('connection', (socket) => {
       userId,
       username: finalUsername,
       pseudo: finalUsername,
+      // Mod de bus et skin choisis par le joueur, transmis aux autres membres
+      // du salon pour qu'ils affichent le bon modèle/la bonne peinture.
+      vehicleId: String(vehicleId || busId || 'bus_default'),
+      skinId: String(skinId || 'default'),
       transform: null,
       lastUpdateTs: 0,
     };
@@ -456,6 +479,8 @@ io.on('connection', (socket) => {
       userId: player.userId,
       username: player.username,
       pseudo: player.pseudo,
+      vehicleId: player.vehicleId,
+      skinId: player.skinId,
     });
 
     // Envoie l'état actuel de la room au nouvel arrivant (dont positions déjà connues)
@@ -468,8 +493,9 @@ io.on('connection', (socket) => {
           userId: p.userId,
           username: p.username,
           pseudo: p.pseudo,
+          vehicleId: p.vehicleId,
+          skinId: p.skinId,
           transform: p.transform,
-          busInfo: p.busInfo || null,
         })),
     });
 
@@ -585,9 +611,6 @@ io.on('connection', (socket) => {
 
     if (!payload || typeof payload !== 'object') return;
     const { position, rotation, controls } = payload;
-    // Identité du bus (modèle + skin) annoncée par le client : nettoyée puis mémorisée
-    const cleanedBusInfo = cleanBusInfo(payload.busInfo);
-    if (cleanedBusInfo) player.busInfo = cleanedBusInfo;
     if (!position || !rotation) return; // position et rotation obligatoires
 
     // Normalisation des commandes (embrayage/frein/accélérateur/direction)
@@ -596,6 +619,18 @@ io.on('connection', (socket) => {
     const throttle = Number(ctrl.throttle ?? payload.throttle) || 0;
     const brake = Number(ctrl.brake ?? payload.brake) || 0;
     const handbrake = Number(ctrl.handbrake ?? payload.handbrake) || 0;
+
+    // Un joueur peut changer de mod de bus / de skin en cours de partie
+    // (redémarrage du véhicule, changement de ligne...) : on met à jour son
+    // état si ces champs sont fournis, sinon on garde la dernière valeur connue.
+    if (payload.vehicleId) player.vehicleId = String(payload.vehicleId);
+    if (payload.skinId) player.skinId = String(payload.skinId);
+
+    // Indicateurs d'affichage purement informatifs (nametag, icône vocale) —
+    // le serveur les relaie tels quels, sans logique dessus.
+    const showNameTag = payload.showNameTag ?? true;
+    const showVoiceIcon = payload.showVoiceIcon ?? false;
+    const isTalking = payload.isTalking ?? false;
 
     const transform = {
       position: {
@@ -623,10 +658,6 @@ io.on('connection', (socket) => {
     };
     player.transform = transform;
 
-    // Options de rendu / voix éventuelles dans le payload
-    const showNameTag = payload.showNameTag !== undefined ? Boolean(payload.showNameTag) : true;
-    const showVoiceIcon = payload.showVoiceIcon !== undefined ? Boolean(payload.showVoiceIcon) : true;
-
     // Diffusion instantanée aux AUTRES membres du salon
     socket.to(room.id).volatile.emit('vehicleUpdate', {
       roomId: room.id,
@@ -634,6 +665,8 @@ io.on('connection', (socket) => {
       userId: player.userId,
       username: player.username,
       pseudo: player.pseudo,
+      vehicleId: player.vehicleId,
+      skinId: player.skinId,
       position: transform.position,
       rotation: transform.rotation,
       controls: transform.controls,
@@ -643,9 +676,8 @@ io.on('connection', (socket) => {
       handbrake,
       showNameTag,
       showVoiceIcon,
+      isTalking,
       transform,
-      // Relayé uniquement quand le client l'a envoyé (toutes les ~3 s) pour économiser la bande passante
-      ...(cleanedBusInfo ? { busInfo: cleanedBusInfo } : {}),
     });
   });
 
