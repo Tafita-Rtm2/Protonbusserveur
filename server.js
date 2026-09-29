@@ -99,6 +99,22 @@ function publicRoomList() {
 }
 
 // ------------------------------------------------------------------
+// Identité détaillée du bus (modèle + skin) — en plus du simple vehicleId/
+// skinId ci-dessus, utile pour qu'un client puisse charger le VRAI mod bus
+// de l'autre joueur (nom de fichier, dossier, texture) plutôt qu'un clone
+// générique. Champs libres, non interprétés par le serveur : on nettoie
+// juste leur taille/type avant de les relayer.
+const BUS_INFO_KEYS = ['busName', 'busEntry', 'busModType', 'busFile', 'busDir', 'busObj', 'skinBus', 'skinTex', 'skinPath'];
+function cleanBusInfo(bi) {
+  if (!bi || typeof bi !== 'object') return null;
+  const out = {};
+  for (const k of BUS_INFO_KEYS) {
+    if (bi[k] !== undefined && bi[k] !== null) out[k] = String(bi[k]).slice(0, 160);
+  }
+  return Object.keys(out).length ? out : null;
+}
+
+// ------------------------------------------------------------------
 // Express app
 // ------------------------------------------------------------------
 const app = express();
@@ -415,7 +431,7 @@ io.on('connection', (socket) => {
   /**
    * Logique interne partagée par createRoom/joinRoom.
    */
-  function joinRoomInternal(sock, roomId, { password, mapId, busId, username, pseudo, vehicleId, skinId }) {
+  function joinRoomInternal(sock, roomId, { password, mapId, busId, username, pseudo, vehicleId, skinId, busInfo }) {
     const room = rooms.get(roomId);
     if (!room) return { ok: false, error: 'Room introuvable.' };
 
@@ -467,6 +483,9 @@ io.on('connection', (socket) => {
       // du salon pour qu'ils affichent le bon modèle/la bonne peinture.
       vehicleId: String(vehicleId || busId || 'bus_default'),
       skinId: String(skinId || 'default'),
+      // Identité détaillée (nom réel du mod, fichier, skin...), fournie plus
+      // tard via vehicleUpdate si absente au moment du join.
+      busInfo: cleanBusInfo(busInfo),
       transform: null,
       lastUpdateTs: 0,
     };
@@ -481,6 +500,7 @@ io.on('connection', (socket) => {
       pseudo: player.pseudo,
       vehicleId: player.vehicleId,
       skinId: player.skinId,
+      busInfo: player.busInfo,
     });
 
     // Envoie l'état actuel de la room au nouvel arrivant (dont positions déjà connues)
@@ -495,6 +515,7 @@ io.on('connection', (socket) => {
           pseudo: p.pseudo,
           vehicleId: p.vehicleId,
           skinId: p.skinId,
+          busInfo: p.busInfo,
           transform: p.transform,
         })),
     });
@@ -625,6 +646,8 @@ io.on('connection', (socket) => {
     // état si ces champs sont fournis, sinon on garde la dernière valeur connue.
     if (payload.vehicleId) player.vehicleId = String(payload.vehicleId);
     if (payload.skinId) player.skinId = String(payload.skinId);
+    const cleanedBusInfo = cleanBusInfo(payload.busInfo);
+    if (cleanedBusInfo) player.busInfo = cleanedBusInfo;
 
     // Indicateurs d'affichage purement informatifs (nametag, icône vocale) —
     // le serveur les relaie tels quels, sans logique dessus.
@@ -667,6 +690,10 @@ io.on('connection', (socket) => {
       pseudo: player.pseudo,
       vehicleId: player.vehicleId,
       skinId: player.skinId,
+      // Envoyé seulement quand fourni par ce client (toutes les ~3s), pour
+      // économiser la bande passante — les autres clients gardent la
+      // dernière valeur connue tant qu'ils n'en reçoivent pas de nouvelle.
+      ...(cleanedBusInfo ? { busInfo: cleanedBusInfo } : {}),
       position: transform.position,
       rotation: transform.rotation,
       controls: transform.controls,
