@@ -1,79 +1,90 @@
 /**
- * Proton Bus Simulator - Serveur Multijoueur
- * -------------------------------------------
- * Express (API REST) + Socket.io (temps réel) + Docker-ready pour Hugging Face Spaces.
+ * Proton Bus Simulator - Serveur Multijoueur (v2)
+ * ------------------------------------------------
+ * Express (API REST) + Socket.io (temps réel) — prêt pour Hugging Face Spaces (Docker, port 7860).
  *
- * NOTE IMPORTANTE (Hugging Face Spaces) :
- * - Le port d'écoute DOIT être 7860.
- * - Le système de fichiers du conteneur est éphémère : les "bases de données"
- *   ci-dessous sont en mémoire (Map/Array). Redémarrage du Space = perte des données.
- *   Pour de la persistance réelle, brancher une vraie DB externe (ex: Supabase, Mongo Atlas).
+ * Compatibilité : tous les événements Socket.io historiques utilisés par le mod du jeu sont conservés
+ * (createRoom, joinRoom, leaveRoom, startGame, vehicleUpdate, busInfo, roomList, roomState, playerJoined,
+ * playerLeft, hostChanged, GAME_STARTED/gameStarted). Les nouveautés sont PUREMENT ADDITIVES :
+ * kickPlayer, banPlayer, unbanPlayer, closeRoom, roomChat, voice:*, roomMembers, roomBans.
+ *
+ * Variables d'environnement (Secrets du Space) :
+ *   JWT_SECRET       secret de signature des tokens (OBLIGATOIRE en prod, sinon clé aléatoire à chaque boot)
+ *   DATABASE_URL     PostgreSQL (Neon / Supabase ...) -> comptes persistants
+ *   ALLOWED_ORIGINS  origines navigateur autorisées, séparées par des virgules (ex: https://mon-site.vercel.app)
+ *   API_PROXY_KEY    si défini, /api/login|register|me n'acceptent QUE les appels portant l'en-tête x-proxy-key
+ *   REQUIRE_AUTH     "true" => tout socket doit avoir un token valide (à activer quand le mod enverra un token)
+ *   ADMIN_KEY        clé pour /api/stats (en-tête x-admin-key)
+ *   ENABLE_DASHBOARD "true" => sert le dashboard de test public/ (désactivé par défaut)
+ *   ICE_SERVERS      JSON de serveurs STUN/TURN pour le vocal (optionnel)
  */
 
 const express = require('express');
 const http = require('http');
 const path = require('path');
+const fs = require('fs');
+const crypto = require('crypto');
 const cors = require('cors');
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { Server } = require('socket.io');
-const { loadUsers, saveUsers } = require('./db');
+const db = require('./db');
 
 // ------------------------------------------------------------------
-// Configuration générale
+// Configuration
 // ------------------------------------------------------------------
-const PORT = process.env.PORT || 7860; // Exigence Hugging Face : port 7860
-const JWT_SECRET = process.env.JWT_SECRET || 'proton-bus-dev-secret-change-me';
-const JWT_EXPIRES_IN = '7d';
-const TICK_RATE = 30; // ticks/sec max
-const MIN_TICK_INTERVAL_MS = 1000 / TICK_RATE; // ~33.33ms
+const PORT = process.env.PORT || 7860;
+const TICK_RATE = 30;
+const MIN_TICK_INTERVAL_MS = 1000 / TICK_RATE;
 const DEFAULT_MAX_PLAYERS = 10;
+const JWT_EXPIRES_IN = '7d';
+
+let JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET) {
+  JWT_SECRET = crypto.randomBytes(48).toString('hex');
+  console.warn('[SECURITE] ⚠️  JWT_SECRET absent : clé aléatoire générée (les sessions sauteront au prochain redémarrage). Définis JWT_SECRET dans les Secrets du Space.');
+}
+
+const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '')
+  .split(',').map((s) => s.trim().replace(/\/$/, '')).filter(Boolean);
+const REQUIRE_AUTH = String(process.env.REQUIRE_AUTH || '').toLowerCase() === 'true';
+const API_PROXY_KEY = process.env.API_PROXY_KEY || '';
+const ADMIN_KEY = process.env.ADMIN_KEY || '';
+const ENABLE_DASHBOARD = String(process.env.ENABLE_DASHBOARD || '').toLowerCase() === 'true';
+
+let ICE_SERVERS = [{ urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] }];
+try {
+  if (process.env.ICE_SERVERS) ICE_SERVERS = JSON.parse(process.env.ICE_SERVERS);
+} catch (e) {
+  console.error('[VOCAL] ICE_SERVERS invalide (JSON attendu), valeur par défaut utilisée.');
+}
+
+/** Les clients natifs (mod du jeu) n'envoient pas d'Origin : toujours acceptés. Les navigateurs doivent être dans la liste. */
+function originCheck(origin, cb) {
+  if (!origin || ALLOWED_ORIGINS.length === 0 || ALLOWED_ORIGINS.includes(origin.replace(/\/$/, ''))) {
+    return cb(null, true);
+  }
+  return cb(null, false);
+}
+
+function safeEqual(a, b) {
+  const x = Buffer.from(String(a || ''));
+  const y = Buffer.from(String(b || ''));
+  return x.length === y.length && crypto.timingSafeEqual(x, y);
+}
 
 // ------------------------------------------------------------------
-// Base de données locale autonome (JSON)
+// Données en mémoire : rooms
 // ------------------------------------------------------------------
-
-/** @type {Map<string, {id:string, username:string, pseudo:string, passwordHash:string, createdAt:number}>} */
-const users = loadUsers(); // charge au démarrage
-
-/**
- * @typedef {Object} Room
- * @property {string} id
- * @property {string} name
- * @property {boolean} isPrivate
- * @property {string|null} passwordHash
- * @property {string} mapId
- * @property {string} busId
- * @property {number} maxPlayers
- * @property {string} hostId
- * @property {Map<string, Player>} players
- * @property {number} createdAt
- */
-
-/**
- * @typedef {Object} Player
- * @property {string} socketId
- * @property {string} userId
- * @property {string} username
- * @property {string} pseudo
- * @property {Object} transform  dernière position/rotation connue
- * @property {number} lastUpdateTs  horodatage du dernier broadcast (throttle 30Hz)
- */
-
-/** @type {Map<string, Room>} */
+/** @type {Map<string, any>} */
 const rooms = new Map();
 
-function userKey(name) {
-  return String(name || '').trim().toLowerCase();
-}
+const userKey = (name) => String(name || '').trim().toLowerCase();
+const genId = (prefix = 'id') => `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 9)}`;
+const cleanText = (v, max) => String(v ?? '').replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, max);
 
-function genId(prefix = 'id') {
-  return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 9)}`;
-}
-
-// ------------------------------------------------------------------
-// Vue publique d'une room (jamais exposer passwordHash)
-// ------------------------------------------------------------------
 function publicRoom(room) {
   const hostPlayer = room.players.get(room.hostId);
   const hostUsername = hostPlayer ? (hostPlayer.username || hostPlayer.pseudo) : '';
@@ -88,22 +99,13 @@ function publicRoom(room) {
     maxPlayers: room.maxPlayers,
     playerCount: room.players.size,
     hostId: room.hostId,
-    hostUsername: hostUsername,
+    hostUsername,
     players: Array.from(room.players.values()).map((p) => p.username || p.pseudo),
     createdAt: room.createdAt,
   };
 }
+const publicRoomList = () => Array.from(rooms.values()).map(publicRoom);
 
-function publicRoomList() {
-  return Array.from(rooms.values()).map(publicRoom);
-}
-
-// ------------------------------------------------------------------
-// Identité détaillée du bus (modèle + skin) — en plus du simple vehicleId/
-// skinId ci-dessus, utile pour qu'un client puisse charger le VRAI mod bus
-// de l'autre joueur (nom de fichier, dossier, texture) plutôt qu'un clone
-// générique. Champs libres, non interprétés par le serveur : on nettoie
-// juste leur taille/type avant de les relayer.
 const BUS_INFO_KEYS = ['busName', 'busEntry', 'busModType', 'busFile', 'busDir', 'busObj', 'skinBus', 'skinTex', 'skinPath'];
 function cleanBusInfo(bi) {
   if (!bi || typeof bi !== 'object') return null;
@@ -115,13 +117,15 @@ function cleanBusInfo(bi) {
 }
 
 // ------------------------------------------------------------------
-// Express app
+// Express
 // ------------------------------------------------------------------
 const app = express();
-app.use(cors({ origin: '*' }));
-app.use(express.json());
+app.set('trust proxy', 1); // Hugging Face / Vercel derrière un reverse-proxy
+app.disable('x-powered-by');
+app.use(helmet({ contentSecurityPolicy: false, crossOriginResourcePolicy: { policy: 'cross-origin' } }));
+app.use(cors({ origin: originCheck }));
+app.use(express.json({ limit: '10kb' }));
 
-// Middleware de gestion des erreurs de syntaxe JSON (ex: payload texte brut invalide)
 app.use((err, req, res, next) => {
   if (err instanceof SyntaxError && err.status === 400 && 'body' in err) {
     return res.status(400).json({ error: 'Format JSON invalide' });
@@ -129,22 +133,52 @@ app.use((err, req, res, next) => {
   next(err);
 });
 
-app.use(express.static(path.join(__dirname, 'public')));
-
 const server = http.createServer(app);
 const io = new Server(server, {
-  cors: {
-    origin: '*',
-    methods: ['GET', 'POST'],
-  },
-  // Ping plus fréquent = détection de déconnexion plus rapide, utile en jeu temps réel.
+  cors: { origin: originCheck, methods: ['GET', 'POST'] },
   pingInterval: 10000,
   pingTimeout: 5000,
+  maxHttpBufferSize: 1e5, // 100 Ko max par message (anti-abus)
 });
 
-// ------------------------------------------------------------------
-// Middleware d'authentification JWT (pour les routes REST protégées)
-// ------------------------------------------------------------------
+// --- Protection "proxy" : l'API de comptes n'est appelable que depuis ton site (Vercel) -------------
+function isProxyCall(req) {
+  return !!API_PROXY_KEY && safeEqual(req.headers['x-proxy-key'], API_PROXY_KEY);
+}
+function requireProxy(req, res, next) {
+  if (!API_PROXY_KEY || isProxyCall(req)) return next();
+  return res.status(404).json({ error: 'Not found' }); // on ne confirme même pas que la route existe
+}
+// Vrai IP du joueur : transmise par le proxy Vercel (seulement si la clé est valide)
+const clientIp = (req) => (isProxyCall(req) && req.headers['x-client-ip']) ? String(req.headers['x-client-ip']).slice(0, 64) : req.ip;
+
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: clientIp,
+  message: { error: 'Trop de tentatives. Réessaie dans quelques minutes.' },
+});
+
+// Anti brute-force par compte
+const failed = new Map(); // key -> {n, until}
+function isLocked(key) {
+  const f = failed.get(key);
+  return !!f && f.until > Date.now();
+}
+function registerFailure(key) {
+  const f = failed.get(key) || { n: 0, until: 0 };
+  f.n += 1;
+  if (f.n >= 8) { f.until = Date.now() + 10 * 60 * 1000; f.n = 0; }
+  failed.set(key, f);
+}
+setInterval(() => { const now = Date.now(); for (const [k, f] of failed) if (f.until && f.until < now) failed.delete(k); }, 60 * 1000).unref();
+
+function signToken(user) {
+  return jwt.sign({ id: user.id, username: user.username, pseudo: user.pseudo }, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN });
+}
+
 function authMiddleware(req, res, next) {
   const header = req.headers.authorization || '';
   const token = header.startsWith('Bearer ') ? header.slice(7) : null;
@@ -157,49 +191,41 @@ function authMiddleware(req, res, next) {
   }
 }
 
-// ------------------------------------------------------------------
-// Routes REST : Authentification
-// ------------------------------------------------------------------
+const USERNAME_RE = /^[\p{L}\p{N}_.\- ]{3,20}$/u;
 
-// POST /api/register  { username, pseudo, password }
-app.post('/api/register', async (req, res) => {
+// ------------------------------------------------------------------
+// REST : authentification
+// ------------------------------------------------------------------
+app.post('/api/register', requireProxy, authLimiter, async (req, res) => {
   try {
     const { username, pseudo, password } = req.body || {};
-    const finalUsername = String(username || pseudo || '').trim();
+    const finalUsername = cleanText(username || pseudo, 20);
 
-    if (!finalUsername || !password) {
-      return res.status(400).json({ error: 'Nom d\'utilisateur (username) et mot de passe requis.' });
+    if (!finalUsername || !password) return res.status(400).json({ error: 'Nom d\'utilisateur et mot de passe requis.' });
+    if (!USERNAME_RE.test(finalUsername)) {
+      return res.status(400).json({ error: 'Nom d\'utilisateur : 3 à 20 caractères (lettres, chiffres, espace, _ . -).' });
     }
-    if (finalUsername.length < 3) {
-      return res.status(400).json({ error: 'Le nom d\'utilisateur doit contenir au moins 3 caractères.' });
-    }
-    if (String(password).length < 4) {
-      return res.status(400).json({ error: 'Le mot de passe doit contenir au moins 4 caractères.' });
+    if (String(password).length < 6 || String(password).length > 100) {
+      return res.status(400).json({ error: 'Le mot de passe doit contenir entre 6 et 100 caractères.' });
     }
 
-    const key = userKey(finalUsername);
-    if (users.has(key)) {
+    if (await db.findUserByName(finalUsername)) {
       return res.status(409).json({ error: 'Ce nom d\'utilisateur est déjà utilisé.' });
     }
 
-    const passwordHash = await bcrypt.hash(password, 10);
     const user = {
       id: genId('user'),
       username: finalUsername,
       pseudo: finalUsername,
-      passwordHash,
+      passwordHash: await bcrypt.hash(String(password), 11),
       createdAt: Date.now(),
     };
-    users.set(key, user);
-    saveUsers(users);
-
-    const token = jwt.sign({ id: user.id, username: user.username, pseudo: user.pseudo }, JWT_SECRET, {
-      expiresIn: JWT_EXPIRES_IN,
-    });
+    const created = await db.createUser(user);
+    if (!created.ok) return res.status(409).json({ error: 'Ce nom d\'utilisateur est déjà utilisé.' });
 
     return res.status(201).json({
       message: 'Compte créé avec succès.',
-      token,
+      token: signToken(user),
       user: { id: user.id, username: user.username, pseudo: user.pseudo },
     });
   } catch (err) {
@@ -208,34 +234,27 @@ app.post('/api/register', async (req, res) => {
   }
 });
 
-// POST /api/login  { username, pseudo, password }
-app.post('/api/login', async (req, res) => {
+app.post('/api/login', requireProxy, authLimiter, async (req, res) => {
   try {
     const { username, pseudo, password } = req.body || {};
-    const finalUsername = String(username || pseudo || '').trim();
-
-    if (!finalUsername || !password) {
-      return res.status(400).json({ error: 'Nom d\'utilisateur (username) et mot de passe requis.' });
-    }
+    const finalUsername = cleanText(username || pseudo, 40);
+    if (!finalUsername || !password) return res.status(400).json({ error: 'Nom d\'utilisateur et mot de passe requis.' });
 
     const key = userKey(finalUsername);
-    const user = users.get(key);
-    if (!user) {
+    if (isLocked(key)) return res.status(429).json({ error: 'Compte temporairement verrouillé (trop d\'échecs). Réessaie dans 10 minutes.' });
+
+    const user = await db.findUserByName(finalUsername);
+    // bcrypt.compare même si l'utilisateur n'existe pas -> temps de réponse constant
+    const valid = await bcrypt.compare(String(password), user ? user.passwordHash : '$2a$11$invalidinvalidinvalidinvalidinvalidinvalidinvalidinvalidinv');
+    if (!user || !valid) {
+      registerFailure(key);
       return res.status(401).json({ error: 'Nom d\'utilisateur ou mot de passe incorrect.' });
     }
-
-    const valid = await bcrypt.compare(password, user.passwordHash);
-    if (!valid) {
-      return res.status(401).json({ error: 'Nom d\'utilisateur ou mot de passe incorrect.' });
-    }
-
-    const token = jwt.sign({ id: user.id, username: user.username, pseudo: user.pseudo }, JWT_SECRET, {
-      expiresIn: JWT_EXPIRES_IN,
-    });
+    failed.delete(key);
 
     return res.json({
       message: 'Connexion réussie.',
-      token,
+      token: signToken(user),
       user: { id: user.id, username: user.username, pseudo: user.pseudo },
     });
   } catch (err) {
@@ -244,184 +263,287 @@ app.post('/api/login', async (req, res) => {
   }
 });
 
-// ------------------------------------------------------------------
-// Routes REST : Rooms (lecture seule ; la création/jonction se fait en WS)
-// ------------------------------------------------------------------
-
-// GET /api/rooms
-app.get('/api/rooms', (req, res) => {
-  res.json({ rooms: publicRoomList() });
+// Vérifie un token et renvoie le compte (utilisé par le site au chargement)
+app.get('/api/me', requireProxy, authMiddleware, async (req, res) => {
+  const user = await db.findUserByName(req.user.username);
+  if (!user || user.id !== req.user.id) return res.status(401).json({ error: 'Compte introuvable.' });
+  res.json({ user: { id: user.id, username: user.username, pseudo: user.pseudo } });
 });
 
-// GET /api/stats (utile pour le dashboard)
-app.get('/api/stats', (req, res) => {
+// ------------------------------------------------------------------
+// REST : infos
+// ------------------------------------------------------------------
+app.get('/api/health', (req, res) => res.json({ ok: true }));
+
+app.get('/api/rooms', (req, res) => res.json({ rooms: publicRoomList() }));
+
+app.get('/api/stats', async (req, res) => {
+  const allowed = ADMIN_KEY ? safeEqual(req.headers['x-admin-key'], ADMIN_KEY) : ENABLE_DASHBOARD;
+  if (!allowed) return res.status(404).json({ error: 'Not found' });
   const totalPlayers = Array.from(rooms.values()).reduce((sum, r) => sum + r.players.size, 0);
   res.json({
-    totalUsers: users.size,
+    totalUsers: await db.countUsers(),
     totalRooms: rooms.size,
     totalPlayersInRooms: totalPlayers,
     connectedSockets: io.engine.clientsCount,
     tickRate: TICK_RATE,
+    db: db.getMode(),
+    requireAuth: REQUIRE_AUTH,
   });
 });
 
-// Route explicite pour le Launcher Android (MainActivity.kt charge
-// ".../launcher" sans extension .html — express.static ne sert que le nom de
-// fichier exact "launcher.html", donc sans cette route, /launcher tombait
-// dans le fallback ci-dessous et affichait le dashboard au lieu du vrai
-// launcher. C'était la cause du bug "chacun crée sa propre room".
+// Launcher Android (fichier peut ne pas exister)
 app.get('/launcher', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'launcher.html'));
+  const f = path.join(__dirname, 'public', 'launcher.html');
+  if (fs.existsSync(f)) return res.sendFile(f);
+  return res.status(404).send('Not found');
 });
 
-// Fallback : sert le dashboard pour toute route inconnue en GET (SPA-friendly)
-app.get('*', (req, res, next) => {
-  if (req.path.startsWith('/api/')) return next();
-  res.sendFile(path.join(__dirname, 'public', 'index.html'));
-});
+if (ENABLE_DASHBOARD) {
+  app.use(express.static(path.join(__dirname, 'public')));
+  app.get('*', (req, res, next) => {
+    if (req.path.startsWith('/api/')) return next();
+    res.sendFile(path.join(__dirname, 'public', 'index.html'));
+  });
+} else {
+  app.get('/', (req, res) => res.type('text/plain').send('Proton Bus server — online'));
+}
+app.use((req, res) => res.status(404).json({ error: 'Not found' }));
 
 // ------------------------------------------------------------------
-// Socket.io : authentification optionnelle du handshake
+// Socket.io : handshake
 // ------------------------------------------------------------------
 io.use((socket, next) => {
   const token = socket.handshake.auth?.token || socket.handshake.query?.token;
+  socket.user = null;
   if (token) {
-    try {
-      socket.user = jwt.verify(token, JWT_SECRET);
-    } catch (err) {
-      // Token invalide : on n'authentifie pas mais on n'empêche pas la connexion
-      // (le pseudo "invité" sera utilisé si fourni côté client lors du join).
-      socket.user = null;
-    }
+    try { socket.user = jwt.verify(String(token), JWT_SECRET); } catch (e) { socket.user = null; }
+  }
+  if (REQUIRE_AUTH && !socket.user) {
+    const err = new Error('AUTH_REQUIRED');
+    err.data = { code: 'AUTH_REQUIRED' };
+    return next(err);
   }
   next();
 });
 
 // ------------------------------------------------------------------
-// Socket.io : logique temps réel
+// Fonctions de room (niveau module : utilisables sur n'importe quel socket)
+// ------------------------------------------------------------------
+const getRoomOf = (sock) => (sock.data.roomId ? rooms.get(sock.data.roomId) : null);
+
+function membersOf(room) {
+  return Array.from(room.players.values()).map((p) => ({
+    socketId: p.socketId,
+    userId: p.userId,
+    username: p.username,
+    inVoice: !!p.inVoice,
+    muted: !!p.muted,
+  }));
+}
+function emitMembers(room) {
+  io.to(room.id).emit('roomMembers', { roomId: room.id, hostId: room.hostId, members: membersOf(room) });
+}
+function emitBans(room) {
+  if (!room.hostId) return;
+  io.to(room.hostId).emit('roomBans', {
+    roomId: room.id,
+    bans: Array.from(room.bans.entries()).map(([key, name]) => ({ key, name })),
+  });
+}
+
+function joinRoomInternal(sock, roomId, { password, mapId, busId, username, pseudo, vehicleId, skinId, busInfo }) {
+  const room = rooms.get(roomId);
+  if (!room) return { ok: false, error: 'Room introuvable.' };
+
+  if (sock.data.roomId === room.id && room.players.has(sock.id)) return { ok: true, room: publicRoom(room) };
+
+  const finalUsername = cleanText(sock.user?.username || sock.user?.pseudo || username || pseudo || `Joueur_${sock.id.slice(0, 5)}`, 24);
+  const userId = sock.user?.id || genId('user');
+
+  if (room.bans.has(`u:${userId}`) || room.bans.has(`n:${userKey(finalUsername)}`)) {
+    return { ok: false, error: 'Tu as été banni de cette room.', code: 'BANNED' };
+  }
+  if (room.players.size >= room.maxPlayers) return { ok: false, error: 'Room pleine.' };
+
+  if (room.passwordHash) {
+    const providedOk = password && bcrypt.compareSync(String(password), room.passwordHash);
+    if (!providedOk) return { ok: false, error: 'Mot de passe incorrect.' };
+  }
+
+  if (mapId && String(mapId) !== room.mapId) {
+    return { ok: false, error: `Incompatibilité de carte : la room exige mapId="${room.mapId}".`, code: 'MAP_MISMATCH' };
+  }
+  if (busId && String(busId) !== room.busId) {
+    return { ok: false, error: `Incompatibilité de bus : la room exige busId="${room.busId}".`, code: 'BUS_MISMATCH' };
+  }
+
+  const player = {
+    socketId: sock.id,
+    userId,
+    username: finalUsername,
+    pseudo: finalUsername,
+    vehicleId: String(vehicleId || busId || 'bus_default'),
+    skinId: String(skinId || 'default'),
+    busInfo: cleanBusInfo(busInfo),
+    transform: null,
+    lastUpdateTs: 0,
+    inVoice: false,
+    muted: false,
+  };
+  room.players.set(sock.id, player);
+  sock.join(room.id);
+  sock.data.roomId = room.id;
+
+  sock.to(room.id).emit('playerJoined', {
+    socketId: sock.id,
+    userId: player.userId,
+    username: player.username,
+    pseudo: player.pseudo,
+    vehicleId: player.vehicleId,
+    skinId: player.skinId,
+    busInfo: player.busInfo,
+  });
+
+  sock.emit('roomState', {
+    room: publicRoom(room),
+    players: Array.from(room.players.values())
+      .filter((p) => p.socketId !== sock.id)
+      .map((p) => ({
+        socketId: p.socketId,
+        userId: p.userId,
+        username: p.username,
+        pseudo: p.pseudo,
+        vehicleId: p.vehicleId,
+        skinId: p.skinId,
+        busInfo: p.busInfo,
+        transform: p.transform,
+        inVoice: !!p.inVoice,
+      })),
+  });
+
+  emitMembers(room);
+  if (room.hostId === sock.id) emitBans(room);
+  return { ok: true, room: publicRoom(room) };
+}
+
+function removeFromRoom(sock) {
+  const roomId = sock.data.roomId;
+  if (!roomId) return;
+  sock.data.roomId = null;
+  const room = rooms.get(roomId);
+  if (!room) return;
+
+  const leaving = room.players.get(sock.id);
+  room.players.delete(sock.id);
+  sock.leave(room.id);
+
+  if (leaving?.inVoice) sock.to(room.id).emit('voice:peer-left', { socketId: sock.id });
+  sock.to(room.id).emit('playerLeft', {
+    socketId: sock.id,
+    userId: leaving?.userId,
+    username: leaving?.username || leaving?.pseudo,
+  });
+
+  if (room.players.size === 0) {
+    rooms.delete(room.id);
+  } else {
+    if (room.hostId === sock.id) {
+      const nextHost = Array.from(room.players.values())[0];
+      room.hostId = nextHost.socketId;
+      io.to(room.id).emit('hostChanged', {
+        newHostId: nextHost.socketId,
+        newHostUsername: nextHost.username,
+        newHostPseudo: nextHost.pseudo,
+        room: publicRoom(room),
+      });
+      emitBans(room);
+    }
+    emitMembers(room);
+  }
+  io.emit('roomList', publicRoomList());
+}
+
+// ------------------------------------------------------------------
+// Socket.io : temps réel
 // ------------------------------------------------------------------
 io.on('connection', (socket) => {
-  const connectedUsername = socket.user?.username || socket.user?.pseudo || 'invité';
-  console.log(`[socket] connecté: ${socket.id} (${connectedUsername})`);
+  socket.data.roomId = null;
+  console.log(`[socket] connecté: ${socket.id} (${socket.user?.username || 'invité'})`);
 
-  // Chaque socket ne peut être que dans une seule room de jeu à la fois.
-  let currentRoomId = null;
+  // Limiteur d'événements (hors vehicleUpdate déjà throttlé) : 40 / 5 s
+  let winStart = Date.now();
+  let winCount = 0;
+  socket.use(([event], next) => {
+    if (event === 'vehicleUpdate') return next();
+    const now = Date.now();
+    if (now - winStart > 5000) { winStart = now; winCount = 0; }
+    if (++winCount > 40) return next(new Error('RATE_LIMITED'));
+    next();
+  });
+  socket.on('error', () => {});
 
-  // Envoie la liste des rooms au nouvel arrivant
   socket.emit('roomList', publicRoomList());
 
-  // -------------------- Obtenir les rooms (getRooms) --------------------
   socket.on('getRooms', (callback) => {
     const roomList = publicRoomList();
     socket.emit('roomList', roomList);
-    if (typeof callback === 'function') {
-      callback({ ok: true, rooms: roomList });
-    }
+    if (typeof callback === 'function') callback({ ok: true, rooms: roomList });
   });
 
-  // -------------------- Création de room --------------------
-  // payload: { roomName, name, isPrivate, password, mapId, busId, maxPlayers, username, pseudo }
+  // -------------------- createRoom --------------------
   socket.on('createRoom', (payload, callback) => {
+    const ack = typeof callback === 'function' ? callback : () => {};
     try {
-      const ack = typeof callback === 'function' ? callback : () => {};
+      // Compte optionnel tant que le mod n'envoie pas de token (activer REQUIRE_AUTH ensuite).
+      const { roomName, name, isPrivate, password, mapId, busId, maxPlayers, username: pu, pseudo: pp } = payload || {};
+      const username = socket.user?.username || socket.user?.pseudo || pu || pp || `Joueur_${socket.id.slice(0, 5)}`;
 
-      // NOTE: le compte (JWT) est redevenu optionnel pour le moment — les
-      // clients (mod du jeu, launcher) n'envoient pas encore de token.
-      // Réactiver ce blocage nécessitera aussi que le client fasse
-      // POST /api/login puis passe le token au handshake Socket.io.
-      // if (!socket.user) {
-      //   return ack({
-      //     ok: false,
-      //     error: 'Compte requis : connecte-toi (POST /api/login) avant de créer une room.',
-      //     code: 'AUTH_REQUIRED',
-      //   });
-      // }
+      const finalRoomName = cleanText(roomName || name, 60);
+      const finalMapId = cleanText(mapId || 'map_tana', 80);
+      const finalBusId = cleanText(busId || 'bus_default', 80);
+      if (!finalRoomName) return ack({ ok: false, error: 'Le nom du salon (roomName ou name) est requis.' });
 
-      const { roomName, name, isPrivate, password, mapId, busId, maxPlayers, username: payloadUsername, pseudo: payloadPseudo } = payload || {};
-      // Priorité au compte authentifié s'il existe, sinon on accepte le
-      // pseudo envoyé par le client (mod du jeu, sans compte pour l'instant).
-      const username = socket.user?.username || socket.user?.pseudo || payloadUsername || payloadPseudo || `Joueur_${socket.id.slice(0, 5)}`;
-      const pseudo = username;
-
-      const finalRoomName = String(roomName || name || '').trim();
-      const finalMapId = String(mapId || 'map_tana').trim();
-      const finalBusId = String(busId || 'bus_default').trim();
-
-      if (!finalRoomName) {
-        return ack({ ok: false, error: 'Le nom du salon (roomName ou name) est requis.' });
-      }
-
-      const roomIsPrivate = Boolean(isPrivate) || Boolean(password);
+      if (socket.data.roomId) removeFromRoom(socket); // un joueur = une seule room
 
       const room = {
         id: genId('room'),
-        name: finalRoomName.slice(0, 60),
-        isPrivate: roomIsPrivate,
-        passwordHash: password ? bcryptSyncHash(password) : null,
+        name: finalRoomName,
+        isPrivate: Boolean(isPrivate) || Boolean(password),
+        passwordHash: password ? bcrypt.hashSync(String(password), 10) : null,
         mapId: finalMapId,
         busId: finalBusId,
-        maxPlayers: Number.isInteger(maxPlayers) && maxPlayers > 0
-          ? Math.min(maxPlayers, 64)
-          : DEFAULT_MAX_PLAYERS,
+        maxPlayers: Number.isInteger(maxPlayers) && maxPlayers > 0 ? Math.min(maxPlayers, 64) : DEFAULT_MAX_PLAYERS,
         hostId: socket.id,
         players: new Map(),
+        bans: new Map(),
         createdAt: Date.now(),
       };
-
       rooms.set(room.id, room);
 
-      // Le créateur rejoint automatiquement sa room
-      const joinResult = joinRoomInternal(socket, room.id, {
-        password,
-        mapId: finalMapId,
-        busId: finalBusId,
-        username,
-        pseudo,
-      });
-
+      const joinResult = joinRoomInternal(socket, room.id, { password, mapId: finalMapId, busId: finalBusId, username, pseudo: username });
       if (!joinResult.ok) {
-        rooms.delete(room.id); // rollback si le join échoue
+        rooms.delete(room.id);
         return ack(joinResult);
       }
-
-      currentRoomId = room.id;
       io.emit('roomList', publicRoomList());
       return ack({ ok: true, room: publicRoom(room) });
     } catch (err) {
       console.error('[createRoom] erreur:', err);
-      return typeof callback === 'function'
-        ? callback({ ok: false, error: 'Erreur serveur.' })
-        : undefined;
+      return ack({ ok: false, error: 'Erreur serveur.' });
     }
   });
 
-  // -------------------- Jonction de room --------------------
-  // payload: { roomId, password, mapId, busId, username, pseudo }
+  // -------------------- joinRoom --------------------
   socket.on('joinRoom', (payload, callback) => {
     const ack = typeof callback === 'function' ? callback : () => {};
     try {
-      // NOTE: compte redevenu optionnel pour le moment (voir createRoom).
-      // if (!socket.user) {
-      //   return ack({
-      //     ok: false,
-      //     error: 'Compte requis : connecte-toi (POST /api/login) avant de rejoindre une room.',
-      //     code: 'AUTH_REQUIRED',
-      //   });
-      // }
-
       const { roomId } = payload || {};
       if (!roomId) return ack({ ok: false, error: 'roomId requis.' });
+      if (socket.data.roomId && socket.data.roomId !== roomId) removeFromRoom(socket);
 
-      // Quitte la room courante si déjà dans une autre room
-      if (currentRoomId && currentRoomId !== roomId) {
-        leaveCurrentRoom();
-      }
-
-      const result = joinRoomInternal(socket, roomId, payload || {});
-      if (result.ok) {
-        currentRoomId = roomId;
-        io.emit('roomList', publicRoomList());
-      }
+      const result = joinRoomInternal(socket, String(roomId), payload || {});
+      if (result.ok) io.emit('roomList', publicRoomList());
       return ack(result);
     } catch (err) {
       console.error('[joinRoom] erreur:', err);
@@ -429,137 +551,18 @@ io.on('connection', (socket) => {
     }
   });
 
-  /**
-   * Logique interne partagée par createRoom/joinRoom.
-   */
-  function joinRoomInternal(sock, roomId, { password, mapId, busId, username, pseudo, vehicleId, skinId, busInfo }) {
-    const room = rooms.get(roomId);
-    if (!room) return { ok: false, error: 'Room introuvable.' };
-
-    if (room.players.size >= room.maxPlayers) {
-      return { ok: false, error: 'Room pleine.' };
-    }
-
-    if (room.passwordHash || room.isPrivate) {
-      if (room.passwordHash) {
-        const providedOk = password && bcrypt.compareSync(password, room.passwordHash);
-        if (!providedOk) return { ok: false, error: 'Mot de passe incorrect.' };
-      }
-    }
-
-    // Vérification stricte de compatibilité map ET bus (les deux doivent
-    // correspondre exactement à ce qu'attend la room, sinon les joueurs ne
-    // verraient pas les mêmes véhicules/décors).
-    if (mapId && String(mapId) !== room.mapId) {
-      return {
-        ok: false,
-        error: `Incompatibilité de carte : la room exige mapId="${room.mapId}".`,
-        code: 'MAP_MISMATCH',
-      };
-    }
-    if (busId && String(busId) !== room.busId) {
-      return {
-        ok: false,
-        error: `Incompatibilité de bus : la room exige busId="${room.busId}".`,
-        code: 'BUS_MISMATCH',
-      };
-    }
-
-    // L'identité authentifiée est TOUJOURS prioritaire sur ce que le client
-    // prétend envoyer dans le payload — évite qu'un joueur usurpe le pseudo
-    // d'un autre. Le payload ne sert de secours que si, un jour, un client
-    // se connecte sans compte (actuellement bloqué en amont pour create/join).
-    const finalUsername = String(sock.user?.username || sock.user?.pseudo || username || pseudo || `Joueur_${sock.id.slice(0, 5)}`)
-      .trim()
-      .slice(0, 24);
-
-    const userId = sock.user?.id || genId('user');
-
-    const player = {
-      socketId: sock.id,
-      userId,
-      username: finalUsername,
-      pseudo: finalUsername,
-      // Mod de bus et skin choisis par le joueur, transmis aux autres membres
-      // du salon pour qu'ils affichent le bon modèle/la bonne peinture.
-      vehicleId: String(vehicleId || busId || 'bus_default'),
-      skinId: String(skinId || 'default'),
-      // Identité détaillée (nom réel du mod, fichier, skin...), fournie plus
-      // tard via vehicleUpdate si absente au moment du join.
-      busInfo: cleanBusInfo(busInfo),
-      transform: null,
-      lastUpdateTs: 0,
-    };
-    room.players.set(sock.id, player);
-    sock.join(room.id);
-
-    // Notifie les autres membres de la room
-    sock.to(room.id).emit('playerJoined', {
-      socketId: sock.id,
-      userId: player.userId,
-      username: player.username,
-      pseudo: player.pseudo,
-      vehicleId: player.vehicleId,
-      skinId: player.skinId,
-      busInfo: player.busInfo,
-    });
-
-    // Envoie l'état actuel de la room au nouvel arrivant (dont positions déjà connues)
-    sock.emit('roomState', {
-      room: publicRoom(room),
-      players: Array.from(room.players.values())
-        .filter((p) => p.socketId !== sock.id)
-        .map((p) => ({
-          socketId: p.socketId,
-          userId: p.userId,
-          username: p.username,
-          pseudo: p.pseudo,
-          vehicleId: p.vehicleId,
-          skinId: p.skinId,
-          busInfo: p.busInfo,
-          transform: p.transform,
-        })),
-    });
-
-    return { ok: true, room: publicRoom(room) };
-  }
-
-  // -------------------- Démarrage du jeu (startGame) --------------------
+  // -------------------- startGame --------------------
   socket.on('startGame', (payload, callback) => {
     const ack = typeof callback === 'function' ? callback : () => {};
     try {
-      if (!currentRoomId) {
-        return ack({ ok: false, error: 'Vous n\'êtes dans aucune room.' });
-      }
+      const room = getRoomOf(socket);
+      if (!room) return ack({ ok: false, error: 'Vous n\'êtes dans aucune room.' });
+      if (room.hostId !== socket.id) return ack({ ok: false, error: 'Seul l\'hôte peut démarrer la partie.' });
 
-      const room = rooms.get(currentRoomId);
-      if (!room) {
-        return ack({ ok: false, error: 'Room introuvable.' });
-      }
-
-      if (room.hostId !== socket.id) {
-        return ack({ ok: false, error: 'Seul l\'hôte peut démarrer la partie.' });
-      }
-
-      // Permet éventuellement de mettre à jour le mapId lors du lancement si précisé
-      if (payload && payload.mapId) {
-        room.mapId = String(payload.mapId).trim();
-      }
-
+      if (payload && payload.mapId) room.mapId = cleanText(payload.mapId, 80);
       const pubRoom = publicRoom(room);
-
-      // Émis à tous les membres de la room
-      io.to(room.id).emit('GAME_STARTED', {
-        mapId: room.mapId,
-        room: pubRoom,
-      });
-
-      // Rétrocompatibilité avec l'événement gameStarted
-      io.to(room.id).emit('gameStarted', {
-        mapId: room.mapId,
-        room: pubRoom,
-      });
-
+      io.to(room.id).emit('GAME_STARTED', { mapId: room.mapId, room: pubRoom });
+      io.to(room.id).emit('gameStarted', { mapId: room.mapId, room: pubRoom });
       return ack({ ok: true, message: 'Partie démarrée !', mapId: room.mapId, room: pubRoom });
     } catch (err) {
       console.error('[startGame] erreur:', err);
@@ -567,122 +570,181 @@ io.on('connection', (socket) => {
     }
   });
 
-  // -------------------- Sortie volontaire de room --------------------
+  // -------------------- leaveRoom --------------------
   socket.on('leaveRoom', (callback) => {
-    const ack = typeof callback === 'function' ? callback : () => {};
-    leaveCurrentRoom();
-    return ack({ ok: true });
+    removeFromRoom(socket);
+    if (typeof callback === 'function') callback({ ok: true });
   });
 
-  function leaveCurrentRoom() {
-    if (!currentRoomId) return;
-    const room = rooms.get(currentRoomId);
-    if (room) {
-      const leavingPlayer = room.players.get(socket.id);
-      room.players.delete(socket.id);
-      socket.leave(room.id);
-
-      socket.to(room.id).emit('playerLeft', {
-        socketId: socket.id,
-        userId: leavingPlayer?.userId,
-        username: leavingPlayer?.username || leavingPlayer?.pseudo,
-      });
-
-      if (room.players.size === 0) {
-        rooms.delete(room.id); // nettoyage : room vide supprimée
-      } else if (room.hostId === socket.id) {
-        // Le créateur/hôte a quitté : transfert du rôle d'hôte au joueur suivant
-        const nextHost = Array.from(room.players.values())[0];
-        if (nextHost) {
-          room.hostId = nextHost.socketId;
-          const updatedRoom = publicRoom(room);
-
-          // Diffusion de l'événement hostChanged
-          io.to(room.id).emit('hostChanged', {
-            newHostId: nextHost.socketId,
-            newHostUsername: nextHost.username,
-            newHostPseudo: nextHost.pseudo,
-            room: updatedRoom,
-          });
-        }
-      }
-      io.emit('roomList', publicRoomList());
-    }
-    currentRoomId = null;
+  // -------------------- Modération (hôte uniquement) --------------------
+  function hostTarget(payload, ack) {
+    const room = getRoomOf(socket);
+    if (!room) { ack({ ok: false, error: 'Vous n\'êtes dans aucune room.' }); return null; }
+    if (room.hostId !== socket.id) { ack({ ok: false, error: 'Réservé au créateur de la room.' }); return null; }
+    const targetId = String(payload?.socketId || '');
+    if (!targetId || targetId === socket.id) { ack({ ok: false, error: 'Cible invalide.' }); return null; }
+    const target = room.players.get(targetId);
+    if (!target) { ack({ ok: false, error: 'Joueur introuvable dans la room.' }); return null; }
+    return { room, target, targetSock: io.sockets.sockets.get(targetId) };
   }
 
-  // -------------------- Synchronisation véhicule (30 Hz max) --------------------
-  // Payload accepté :
-  // {
-  //   position: {x, y, z},
-  //   rotation: {x, y, z, w},
-  //   controls: { steerInput, throttle, brake, handbrake }  OU  steerInput, throttle, brake, handbrake à la racine
-  // }
-  socket.on('vehicleUpdate', (payload) => {
-    if (!currentRoomId) return;
-    const room = rooms.get(currentRoomId);
-    if (!room) return;
+  socket.on('kickPlayer', (payload, callback) => {
+    const ack = typeof callback === 'function' ? callback : () => {};
+    const t = hostTarget(payload, ack);
+    if (!t) return;
+    if (t.targetSock) {
+      t.targetSock.emit('kicked', { roomId: t.room.id, roomName: t.room.name, banned: false });
+      removeFromRoom(t.targetSock);
+    }
+    ack({ ok: true });
+  });
 
+  socket.on('banPlayer', (payload, callback) => {
+    const ack = typeof callback === 'function' ? callback : () => {};
+    const t = hostTarget(payload, ack);
+    if (!t) return;
+    const { room, target, targetSock } = t;
+    const isGuest = !targetSock?.user;
+    // Un compte est banni par son id ET son pseudo ; un invité par son pseudo seulement.
+    room.bans.set(isGuest ? `n:${userKey(target.username)}` : `u:${target.userId}`, target.username);
+    if (!isGuest) room.bans.set(`n:${userKey(target.username)}`, target.username);
+    if (targetSock) {
+      targetSock.emit('kicked', { roomId: room.id, roomName: room.name, banned: true });
+      removeFromRoom(targetSock);
+    }
+    emitBans(room);
+    ack({ ok: true });
+  });
+
+  socket.on('unbanPlayer', (payload, callback) => {
+    const ack = typeof callback === 'function' ? callback : () => {};
+    const room = getRoomOf(socket);
+    if (!room || room.hostId !== socket.id) return ack({ ok: false, error: 'Réservé au créateur de la room.' });
+    const name = room.bans.get(String(payload?.key || ''));
+    if (name === undefined) return ack({ ok: false, error: 'Entrée introuvable.' });
+    for (const [k, v] of Array.from(room.bans.entries())) if (v === name) room.bans.delete(k);
+    emitBans(room);
+    ack({ ok: true });
+  });
+
+  socket.on('closeRoom', (payload, callback) => {
+    const ack = typeof callback === 'function' ? callback : () => {};
+    const room = getRoomOf(socket);
+    if (!room) return ack({ ok: false, error: 'Vous n\'êtes dans aucune room.' });
+    if (room.hostId !== socket.id) return ack({ ok: false, error: 'Réservé au créateur de la room.' });
+
+    const hostName = room.players.get(socket.id)?.username || '';
+    socket.to(room.id).emit('roomClosed', { roomId: room.id, roomName: room.name, by: hostName });
+    for (const sid of Array.from(room.players.keys())) {
+      const s = io.sockets.sockets.get(sid);
+      if (s) { s.data.roomId = null; s.leave(room.id); }
+    }
+    rooms.delete(room.id);
+    io.emit('roomList', publicRoomList());
+    ack({ ok: true });
+  });
+
+  // -------------------- Chat de room --------------------
+  socket.on('roomChat', (payload) => {
+    const room = getRoomOf(socket);
+    const player = room?.players.get(socket.id);
+    if (!room || !player) return;
+    const text = cleanText(payload?.text, 300);
+    if (!text) return;
+    io.to(room.id).emit('roomChat', {
+      id: genId('msg'),
+      socketId: socket.id,
+      username: player.username,
+      text,
+      ts: Date.now(),
+    });
+  });
+
+  // -------------------- Vocal (signalisation WebRTC ; l'audio passe en P2P) --------------------
+  socket.on('voice:join', (payload, callback) => {
+    const ack = typeof callback === 'function' ? callback : () => {};
+    const room = getRoomOf(socket);
+    const player = room?.players.get(socket.id);
+    if (!room || !player) return ack({ ok: false, error: 'Vous n\'êtes dans aucune room.' });
+    player.inVoice = true;
+    player.muted = false;
+    const peers = Array.from(room.players.values())
+      .filter((p) => p.socketId !== socket.id && p.inVoice)
+      .map((p) => ({ socketId: p.socketId, username: p.username }));
+    ack({ ok: true, peers, iceServers: ICE_SERVERS });
+    socket.to(room.id).emit('voice:peer-joined', { socketId: socket.id, username: player.username });
+    emitMembers(room);
+  });
+
+  socket.on('voice:leave', () => {
+    const room = getRoomOf(socket);
+    const player = room?.players.get(socket.id);
+    if (!room || !player || !player.inVoice) return;
+    player.inVoice = false;
+    player.muted = false;
+    socket.to(room.id).emit('voice:peer-left', { socketId: socket.id });
+    emitMembers(room);
+  });
+
+  socket.on('voice:state', (payload) => {
+    const room = getRoomOf(socket);
+    const player = room?.players.get(socket.id);
+    if (!room || !player || !player.inVoice) return;
+    player.muted = !!payload?.muted;
+    emitMembers(room);
+  });
+
+  socket.on('voice:signal', (payload) => {
+    const room = getRoomOf(socket);
+    if (!room || !payload || typeof payload !== 'object') return;
+    const target = room.players.get(String(payload.to || ''));
+    const me = room.players.get(socket.id);
+    if (!target || !me || !me.inVoice || !target.inVoice) return;
+    let size = 0;
+    try { size = JSON.stringify(payload.data || {}).length; } catch (e) { return; }
+    if (size > 20000) return;
+    io.to(target.socketId).emit('voice:signal', { from: socket.id, data: payload.data });
+  });
+
+  // -------------------- vehicleUpdate (30 Hz max) — INCHANGÉ --------------------
+  socket.on('vehicleUpdate', (payload) => {
+    const room = getRoomOf(socket);
+    if (!room) return;
     const player = room.players.get(socket.id);
     if (!player) return;
 
     const now = Date.now();
-    // Throttle serveur : ignore si émis à une fréquence > 30 Hz (~33.3ms)
     if (now - player.lastUpdateTs < MIN_TICK_INTERVAL_MS) return;
     player.lastUpdateTs = now;
 
     if (!payload || typeof payload !== 'object') return;
     const { position, rotation, controls } = payload;
-    if (!position || !rotation) return; // position et rotation obligatoires
+    if (!position || !rotation) return;
 
-    // Normalisation des commandes (embrayage/frein/accélérateur/direction)
     const ctrl = controls || {};
     const steerInput = Number(ctrl.steerInput ?? payload.steerInput) || 0;
     const throttle = Number(ctrl.throttle ?? payload.throttle) || 0;
     const brake = Number(ctrl.brake ?? payload.brake) || 0;
     const handbrake = Number(ctrl.handbrake ?? payload.handbrake) || 0;
 
-    // Un joueur peut changer de mod de bus / de skin en cours de partie
-    // (redémarrage du véhicule, changement de ligne...) : on met à jour son
-    // état si ces champs sont fournis, sinon on garde la dernière valeur connue.
     if (payload.vehicleId) player.vehicleId = String(payload.vehicleId);
     if (payload.skinId) player.skinId = String(payload.skinId);
     const cleanedBusInfo = cleanBusInfo(payload.busInfo);
     if (cleanedBusInfo) player.busInfo = cleanedBusInfo;
 
-    // Indicateurs d'affichage purement informatifs (nametag, icône vocale) —
-    // le serveur les relaie tels quels, sans logique dessus.
     const showNameTag = payload.showNameTag ?? true;
     const showVoiceIcon = payload.showVoiceIcon ?? false;
     const isTalking = payload.isTalking ?? false;
 
     const transform = {
-      position: {
-        x: Number(position.x) || 0,
-        y: Number(position.y) || 0,
-        z: Number(position.z) || 0,
-      },
-      rotation: {
-        x: Number(rotation.x) || 0,
-        y: Number(rotation.y) || 0,
-        z: Number(rotation.z) || 0,
-        w: Number(rotation.w) || 1,
-      },
-      controls: {
-        steerInput,
-        throttle,
-        brake,
-        handbrake,
-      },
-      steerInput,
-      throttle,
-      brake,
-      handbrake,
+      position: { x: Number(position.x) || 0, y: Number(position.y) || 0, z: Number(position.z) || 0 },
+      rotation: { x: Number(rotation.x) || 0, y: Number(rotation.y) || 0, z: Number(rotation.z) || 0, w: Number(rotation.w) || 1 },
+      controls: { steerInput, throttle, brake, handbrake },
+      steerInput, throttle, brake, handbrake,
       ts: now,
     };
     player.transform = transform;
 
-    // Diffusion instantanée aux AUTRES membres du salon
     socket.to(room.id).volatile.emit('vehicleUpdate', {
       roomId: room.id,
       socketId: socket.id,
@@ -691,41 +753,32 @@ io.on('connection', (socket) => {
       pseudo: player.pseudo,
       vehicleId: player.vehicleId,
       skinId: player.skinId,
-      // Envoyé seulement quand fourni par ce client (toutes les ~3s), pour
-      // économiser la bande passante — les autres clients gardent la
-      // dernière valeur connue tant qu'ils n'en reçoivent pas de nouvelle.
       ...(cleanedBusInfo ? { busInfo: cleanedBusInfo } : {}),
       position: transform.position,
       rotation: transform.rotation,
       controls: transform.controls,
-      steerInput,
-      throttle,
-      brake,
-      handbrake,
-      showNameTag,
-      showVoiceIcon,
-      isTalking,
+      steerInput, throttle, brake, handbrake,
+      showNameTag, showVoiceIcon, isTalking,
       transform,
     });
   });
 
-  // -------------------- Déconnexion --------------------
   socket.on('disconnect', (reason) => {
     console.log(`[socket] déconnecté: ${socket.id} (${reason})`);
-    leaveCurrentRoom();
+    removeFromRoom(socket);
   });
 });
 
-// bcrypt.hash est async ; pour la création de room (contexte non-async ici) on utilise
-// la variante synchrone, acceptable vu la faible fréquence de création de rooms.
-function bcryptSyncHash(password) {
-  return bcrypt.hashSync(password, 10);
-}
-
 // ------------------------------------------------------------------
-// Démarrage du serveur
+// Démarrage
 // ------------------------------------------------------------------
-server.listen(PORT, '0.0.0.0', () => {
-  console.log(`🚌 Proton Bus Multiplayer Server en écoute sur le port ${PORT}`);
-  console.log(`   Tick rate max: ${TICK_RATE}/s (${MIN_TICK_INTERVAL_MS.toFixed(1)}ms/update)`);
+db.init().then((mode) => {
+  server.listen(PORT, '0.0.0.0', () => {
+    console.log(`🚌 Proton Bus Multiplayer Server — port ${PORT} — DB: ${mode}`);
+    console.log(`   CORS: ${ALLOWED_ORIGINS.length ? ALLOWED_ORIGINS.join(', ') : '* (aucune restriction — définis ALLOWED_ORIGINS)'}`);
+    console.log(`   REQUIRE_AUTH=${REQUIRE_AUTH}  API_PROXY_KEY=${API_PROXY_KEY ? 'oui' : 'non'}  Dashboard=${ENABLE_DASHBOARD}`);
+  });
 });
+
+process.on('unhandledRejection', (e) => console.error('[unhandledRejection]', e));
+process.on('uncaughtException', (e) => console.error('[uncaughtException]', e));

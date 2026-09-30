@@ -19,12 +19,13 @@ Ce dépôt se synchronise automatiquement vers le Space Hugging Face
 (`Tafitaniaina/TVserveur`) à chaque push sur `main`, via
 `.github/workflows/deploy-to-hf.yml`.
 
-## Fichiers principaux
+## Structure (v2)
 
-- `server.js` — serveur Express + Socket.io (API REST, rooms, auth)
-- `db.js` — persistance simple des comptes (fichier JSON local)
-- `public/index.html` — dashboard de test (comptes, rooms, logs Socket.io)
-- `public/launcher.html` — page servie au Launcher Android externe
-- `Dockerfile` — build du conteneur pour Hugging Face Spaces (port 7860)
+- `server.js` — serveur Express + Socket.io : comptes, rooms, modération (kick/ban/fermeture), chat, signalisation vocale
+- `db.js` — comptes en PostgreSQL (`DATABASE_URL`), repli JSON si absent
+- `web/` — interface Next.js (Vercel) : connexion, lobby, room, vocal
+- `test/smoke.js` — tests de bout en bout du serveur
+- `public/` — ancien dashboard de test (désactivé par défaut, `ENABLE_DASHBOARD=true`)
+- `DEPLOY.md` — **guide de déploiement complet et notes de sécurité**
 
 Voir `GUIDE-APK.md` pour l'installation du mod côté APK.
