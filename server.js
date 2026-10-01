@@ -17,7 +17,12 @@
  *   ADMIN_KEY        clé pour /api/stats (en-tête x-admin-key)
  *   ENABLE_DASHBOARD "true" => sert le dashboard de test public/ (désactivé par défaut)
  *   ICE_SERVERS      JSON de serveurs STUN/TURN pour le vocal (optionnel)
+ *   SUPABASE_URL / SUPABASE_SECRET_KEY   base de comptes Supabase (voir supabase/schema.sql)
+ *   SOCKET_PATH_KEY  si défini, Socket.io n'est joignable QUE sur /<clé>/socket.io (injecté par le proxy Vercel).
+ *                    Combiné à API_PROXY_KEY : l'URL Hugging Face seule ne sert plus à rien (tout répond 404).
  */
+
+try { require('dotenv').config(); } catch (e) { /* dotenv optionnel : sur Hugging Face les Secrets sont déjà des variables d'environnement */ }
 
 const express = require('express');
 const http = require('http');
@@ -51,6 +56,8 @@ const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '')
   .split(',').map((s) => s.trim().replace(/\/$/, '')).filter(Boolean);
 const REQUIRE_AUTH = String(process.env.REQUIRE_AUTH || '').toLowerCase() === 'true';
 const API_PROXY_KEY = process.env.API_PROXY_KEY || '';
+const SOCKET_PATH_KEY = (process.env.SOCKET_PATH_KEY || '').replace(/[^A-Za-z0-9_-]/g, '');
+const SOCKET_PATH = SOCKET_PATH_KEY ? `/${SOCKET_PATH_KEY}/socket.io` : '/socket.io';
 const ADMIN_KEY = process.env.ADMIN_KEY || '';
 const ENABLE_DASHBOARD = String(process.env.ENABLE_DASHBOARD || '').toLowerCase() === 'true';
 
@@ -135,6 +142,7 @@ app.use((err, req, res, next) => {
 
 const server = http.createServer(app);
 const io = new Server(server, {
+  path: SOCKET_PATH,
   cors: { origin: originCheck, methods: ['GET', 'POST'] },
   pingInterval: 10000,
   pingTimeout: 5000,
@@ -192,6 +200,9 @@ function authMiddleware(req, res, next) {
 }
 
 const USERNAME_RE = /^[\p{L}\p{N}_.\- ]{3,20}$/u;
+
+// Verrouillage global : si API_PROXY_KEY est défini, TOUTE route /api exige la clé (sinon 404 muet).
+app.use('/api', requireProxy);
 
 // ------------------------------------------------------------------
 // REST : authentification
@@ -588,13 +599,22 @@ io.on('connection', (socket) => {
     return { room, target, targetSock: io.sockets.sockets.get(targetId) };
   }
 
+  // Un joueur peut être connecté deux fois (site + jeu) sous le même pseudo : on les retire ensemble.
+  function socketsOfUser(room, target, hostSocketId) {
+    const key = userKey(target.username);
+    return Array.from(room.players.values())
+      .filter((p) => p.socketId !== hostSocketId && (p.socketId === target.socketId || userKey(p.username) === key))
+      .map((p) => io.sockets.sockets.get(p.socketId))
+      .filter(Boolean);
+  }
+
   socket.on('kickPlayer', (payload, callback) => {
     const ack = typeof callback === 'function' ? callback : () => {};
     const t = hostTarget(payload, ack);
     if (!t) return;
-    if (t.targetSock) {
-      t.targetSock.emit('kicked', { roomId: t.room.id, roomName: t.room.name, banned: false });
-      removeFromRoom(t.targetSock);
+    for (const sock of socketsOfUser(t.room, t.target, socket.id)) {
+      sock.emit('kicked', { roomId: t.room.id, roomName: t.room.name, banned: false });
+      removeFromRoom(sock);
     }
     ack({ ok: true });
   });
@@ -608,9 +628,9 @@ io.on('connection', (socket) => {
     // Un compte est banni par son id ET son pseudo ; un invité par son pseudo seulement.
     room.bans.set(isGuest ? `n:${userKey(target.username)}` : `u:${target.userId}`, target.username);
     if (!isGuest) room.bans.set(`n:${userKey(target.username)}`, target.username);
-    if (targetSock) {
-      targetSock.emit('kicked', { roomId: room.id, roomName: room.name, banned: true });
-      removeFromRoom(targetSock);
+    for (const sock of socketsOfUser(room, target, socket.id)) {
+      sock.emit('kicked', { roomId: room.id, roomName: room.name, banned: true });
+      removeFromRoom(sock);
     }
     emitBans(room);
     ack({ ok: true });
@@ -776,6 +796,7 @@ db.init().then((mode) => {
   server.listen(PORT, '0.0.0.0', () => {
     console.log(`🚌 Proton Bus Multiplayer Server — port ${PORT} — DB: ${mode}`);
     console.log(`   CORS: ${ALLOWED_ORIGINS.length ? ALLOWED_ORIGINS.join(', ') : '* (aucune restriction — définis ALLOWED_ORIGINS)'}`);
+    console.log(`   Socket.io path: ${SOCKET_PATH_KEY ? '/<clé secrète>/socket.io (verrouillé)' : '/socket.io (public)'}`);
     console.log(`   REQUIRE_AUTH=${REQUIRE_AUTH}  API_PROXY_KEY=${API_PROXY_KEY ? 'oui' : 'non'}  Dashboard=${ENABLE_DASHBOARD}`);
   });
 });

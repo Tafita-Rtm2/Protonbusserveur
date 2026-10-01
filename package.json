@@ -5,19 +5,21 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "test": "node test/smoke.js"
+    "test": "node test/smoke.js && node test/lock.js && node test/db-supabase.js"
   },
   "license": "MIT",
   "dependencies": {
+    "@supabase/supabase-js": "^2.117.2",
     "bcryptjs": "^2.4.3",
     "cors": "^2.8.5",
+    "dotenv": "^18.0.5",
     "express": "^4.19.2",
-    "jsonwebtoken": "^9.0.2",
-    "socket.io": "^4.7.5",
-    "socket.io-client": "^4.8.3",
-    "helmet": "^7.1.0",
     "express-rate-limit": "^7.4.0",
-    "pg": "^8.12.0"
+    "helmet": "^7.1.0",
+    "jsonwebtoken": "^9.0.2",
+    "pg": "^8.12.0",
+    "socket.io": "^4.7.5",
+    "socket.io-client": "^4.8.3"
   },
   "engines": {
     "node": ">=20.0.0"

@@ -1,7 +1,8 @@
 /**
  * Couche base de données des comptes.
- * - Si DATABASE_URL est défini  -> vraie base PostgreSQL (Neon, Supabase, etc.) : les comptes survivent aux redémarrages.
- * - Sinon                       -> repli sur un fichier JSON local (éphémère sur Hugging Face !).
+ * - SUPABASE_URL + SUPABASE_SECRET_KEY -> Supabase (recommandé) : comptes persistants.
+ * - DATABASE_URL                        -> PostgreSQL direct (Neon, etc.).
+ * - Sinon                               -> repli sur un fichier JSON local (éphémère sur Hugging Face !).
  */
 const fs = require('fs');
 const path = require('path');
@@ -9,6 +10,7 @@ const path = require('path');
 const JSON_FILE = path.join(process.env.DATA_DIR || __dirname, 'users.json');
 
 let pool = null;
+let sb = null;
 let mode = 'json';
 const mem = new Map(); // repli JSON : clé (username en minuscules) -> user
 
@@ -90,8 +92,45 @@ async function initPostgres() {
   }
 }
 
+// -------------------------------------------------------------- Supabase
+async function initSupabase() {
+  const { createClient } = require('@supabase/supabase-js');
+  sb = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SECRET_KEY, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+  const { count, error } = await sb.from('users').select('id', { count: 'exact', head: true });
+  if (error) {
+    const missing = error.code === 'PGRST205' || /does not exist|schema cache/i.test(error.message || '');
+    throw new Error(missing
+      ? 'table "users" absente : exécute supabase/schema.sql dans Supabase → SQL Editor'
+      : (error.message || error.code || 'erreur inconnue'));
+  }
+  // Import unique des anciens comptes users.json si la table est vide
+  if (count === 0) {
+    loadJson();
+    for (const u of mem.values()) {
+      await sb.from('users').insert({
+        id: u.id, username: u.username, username_key: keyOf(u.username), password_hash: u.passwordHash, created_at: u.createdAt,
+      });
+    }
+    if (mem.size) console.log(`[DB] ${mem.size} ancien(s) compte(s) importé(s) dans Supabase.`);
+    mem.clear();
+  }
+}
+
 // ------------------------------------------------------------------ API
 async function init() {
+  if (process.env.SUPABASE_URL && process.env.SUPABASE_SECRET_KEY) {
+    try {
+      await initSupabase();
+      mode = 'supabase';
+      console.log('[DB] Supabase connecté ✔');
+      return mode;
+    } catch (err) {
+      console.error('[DB] ⚠️  Supabase inaccessible, repli (comptes NON persistants):', err.message);
+      sb = null;
+    }
+  }
   if (process.env.DATABASE_URL) {
     try {
       await initPostgres();
@@ -102,8 +141,8 @@ async function init() {
       console.error('[DB] ⚠️  PostgreSQL inaccessible, repli sur JSON (comptes NON persistants):', err.message);
       pool = null;
     }
-  } else {
-    console.warn('[DB] ⚠️  DATABASE_URL absent : comptes stockés en JSON éphémère.');
+  } else if (!process.env.SUPABASE_URL) {
+    console.warn('[DB] ⚠️  Aucune base configurée : comptes stockés en JSON éphémère.');
   }
   loadJson();
   mode = 'json';
@@ -113,6 +152,11 @@ async function init() {
 async function findUserByName(name) {
   const k = keyOf(name);
   if (!k) return null;
+  if (mode === 'supabase') {
+    const { data, error } = await sb.from('users').select('*').eq('username_key', k).maybeSingle();
+    if (error) throw new Error(error.message);
+    return data ? rowToUser(data) : null;
+  }
   if (mode === 'postgres') {
     const { rows } = await pool.query('SELECT * FROM users WHERE username_key = $1', [k]);
     return rows[0] ? rowToUser(rows[0]) : null;
@@ -123,6 +167,14 @@ async function findUserByName(name) {
 /** @returns {Promise<{ok:true}|{ok:false, conflict:true}>} */
 async function createUser(user) {
   const k = keyOf(user.username);
+  if (mode === 'supabase') {
+    const { error } = await sb.from('users').insert({
+      id: user.id, username: user.username, username_key: k, password_hash: user.passwordHash, created_at: user.createdAt,
+    });
+    if (!error) return { ok: true };
+    if (error.code === '23505') return { ok: false, conflict: true };
+    throw new Error(error.message);
+  }
   if (mode === 'postgres') {
     try {
       await pool.query(
@@ -142,6 +194,10 @@ async function createUser(user) {
 }
 
 async function countUsers() {
+  if (mode === 'supabase') {
+    const { count } = await sb.from('users').select('id', { count: 'exact', head: true });
+    return count || 0;
+  }
   if (mode === 'postgres') {
     const { rows } = await pool.query('SELECT COUNT(*)::int AS n FROM users');
     return rows[0].n;

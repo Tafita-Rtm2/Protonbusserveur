@@ -29,16 +29,5 @@ export const api = {
     } catch {
       return null;
     }
-  },
-
-  /** L'URL du serveur temps réel n'est révélée qu'à un utilisateur connecté (elle n'est jamais dans le code JS). */
-  async socketUrl(token: string): Promise<string | null> {
-    try {
-      const res = await fetch('/api/socket-config', { headers: { authorization: `Bearer ${token}` }, cache: 'no-store' });
-      if (!res.ok) return null;
-      return (await res.json()).url ?? null;
-    } catch {
-      return null;
-    }
-  },
+  }
 };

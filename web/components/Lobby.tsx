@@ -1,6 +1,8 @@
 'use client';
-import { useMemo, useState } from 'react';
-import { Bus, Crown, KeyRound, Loader2, Lock, LogOut, Map as MapIcon, Plus, RefreshCw, Search, Users, Wifi, WifiOff } from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
+import { Bus, Crown, KeyRound, Loader2, Lock, LogOut, Map as MapIcon, Plus, RefreshCw, ScrollText, Search, Smartphone, Users, Wifi, WifiOff } from 'lucide-react';
+import { android } from '@/lib/android';
+import { LogsModal } from './LogsModal';
 import { useGame } from '@/lib/GameProvider';
 import type { RoomInfo } from '@/lib/types';
 import { Logo } from './Logo';
@@ -12,6 +14,9 @@ export function Lobby() {
   const [query, setQuery] = useState('');
   const [creating, setCreating] = useState(false);
   const [joinTarget, setJoinTarget] = useState<RoomInfo | null>(null);
+  const [logs, setLogs] = useState(false);
+  const [native, setNative] = useState<{ ok: boolean; logs: boolean } | null>(null);
+  useEffect(() => { setNative({ ok: android.canLaunch(), logs: android.hasLogs() }); }, []);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -36,9 +41,19 @@ export function Lobby() {
             <Avatar name={user!.username} size={30} />
             <span className="max-w-[110px] truncate text-sm font-semibold text-white">{user!.username}</span>
           </div>
+          {native?.logs && (
+            <button onClick={() => setLogs(true)} className="icon-btn h-10 w-10 border border-white/10" title="Voir les logs" aria-label="Voir les logs"><ScrollText size={18} /></button>
+          )}
           <button onClick={logout} className="icon-btn h-10 w-10 border border-white/10" title="Se déconnecter" aria-label="Se déconnecter"><LogOut size={18} /></button>
         </div>
       </header>
+
+      {native && !native.ok && (
+        <div className="mt-4 flex items-start gap-3 rounded-2xl border border-amber-400/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-200">
+          <Smartphone size={18} className="mt-0.5 shrink-0" />
+          <p><strong>Information :</strong> ouvre cette page depuis l’application Launcher Proton Bus Sync pour lancer le jeu.</p>
+        </div>
+      )}
 
       {/* Titre + actions */}
       <section className="mt-8 flex flex-col gap-5 sm:flex-row sm:items-end sm:justify-between">
@@ -77,6 +92,7 @@ export function Lobby() {
         </div>
       )}
 
+      {logs && <LogsModal onClose={() => setLogs(false)} />}
       {creating && <CreateModal onClose={() => setCreating(false)} />}
       {joinTarget && <JoinModal room={joinTarget} onClose={() => setJoinTarget(null)} />}
     </div>
@@ -157,7 +173,7 @@ function CreateModal({ onClose }: { onClose: () => void }) {
         </div>
         <div>
           <label className="label" htmlFor="rx">Joueurs max : <span className="text-brand-400">{max}</span></label>
-          <input id="rx" type="range" min={2} max={32} value={max} onChange={(e) => setMax(Number(e.target.value))} className="w-full accent-amber-400" />
+          <input id="rx" type="range" min={2} max={64} value={max} onChange={(e) => setMax(Number(e.target.value))} className="w-full accent-amber-400" />
         </div>
         <button type="button" onClick={() => setPriv(!priv)} className={`flex w-full items-center gap-3 rounded-xl border px-4 py-3 text-left transition ${priv ? 'border-brand-500/50 bg-brand-500/10' : 'border-white/10 bg-white/5'}`}>
           <Lock size={18} className={priv ? 'text-brand-400' : 'text-slate-500'} />

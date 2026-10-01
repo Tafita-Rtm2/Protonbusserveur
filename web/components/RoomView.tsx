@@ -2,7 +2,7 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   Ban, Bus, Check, Copy, Crown, DoorOpen, Headphones, Loader2, Lock, Map as MapIcon, MessageCircle, Mic, MicOff,
-  Phone, PhoneOff, Play, Send, ShieldAlert, Trash2, UserMinus, Users, Volume2,
+  Gamepad2, Phone, PhoneOff, Play, Send, ShieldAlert, Trash2, UserMinus, Users, Volume2,
 } from 'lucide-react';
 import { useGame } from '@/lib/GameProvider';
 import { useVoice } from '@/lib/useVoice';
@@ -14,7 +14,7 @@ import { Modal } from './Modal';
 type Confirm = { kind: 'kick' | 'ban' | 'close'; member?: Member } | null;
 
 export function RoomView() {
-  const { socket, room, roomId, members, bans, chat, gameStarted, isHost, leaveRoom, startGame, kick, ban, unban, closeRoom, sendChat } = useGame();
+  const { socket, room, roomId, members, bans, chat, gameStarted, isHost, leaveRoom, startGame, kick, ban, unban, closeRoom, sendChat, launchGame } = useGame();
   const voice = useVoice(socket, roomId);
   const [confirm, setConfirm] = useState<Confirm>(null);
   const [copied, setCopied] = useState(false);
@@ -61,6 +61,7 @@ export function RoomView() {
               <button onClick={() => setConfirm({ kind: 'close' })} className="btn-danger"><Trash2 size={16} /><span className="hidden sm:inline">Détruire la room</span></button>
             </>
           )}
+          <button onClick={launchGame} className="btn-ghost" title="Ouvre le jeu et rejoint cette room"><Gamepad2 size={16} />Ouvrir le jeu</button>
           <button onClick={leaveRoom} className="btn-ghost"><DoorOpen size={16} />Quitter</button>
         </div>
       </header>
