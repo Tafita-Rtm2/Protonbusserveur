@@ -14,7 +14,7 @@ const tryConnect = (path) => new Promise((res) => {
 setTimeout(() => { console.log('TIMEOUT'); process.exit(2); }, 30000).unref();
 (async () => {
   require('fs').rmSync('/tmp/users.json', { force: true });
-  const srv = spawn('node', ['server.js'], { env: { ...process.env, PORT, API_PROXY_KEY: KEY, SOCKET_PATH_KEY: SK, JWT_SECRET: 'z'.repeat(40), DATA_DIR: '/tmp' }, stdio: 'ignore' });
+  const srv = spawn('node', ['server.js'], { env: { ...process.env, DOTENV_CONFIG_PATH: '/nonexistent', PORT, API_PROXY_KEY: KEY, SOCKET_PATH_KEY: SK, JWT_SECRET: 'z'.repeat(40), DATA_DIR: '/tmp' }, stdio: 'ignore' });
   await sleep(1200);
   console.log('Verrouillage');
   ok(await status('/api/rooms') === 404, '/api/rooms sans clé => 404');

@@ -119,7 +119,7 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
     (async () => {
       // Même origine que le site : Vercel relaie /socket.io vers le serveur (URL Hugging Face jamais exposée).
       // Vercel ne supporte pas les WebSockets => long-polling uniquement.
-      s = io({ path: '/socket.io', auth: { token }, transports: ['polling'], reconnectionDelayMax: 5000 });
+      s = io({ path: '/socket.io', auth: { token, client: 'web' }, transports: ['polling'], reconnectionDelayMax: 5000 });
       setSocket(s);
 
       s.on('connect', () => {

@@ -18,11 +18,11 @@
  *   ENABLE_DASHBOARD "true" => sert le dashboard de test public/ (désactivé par défaut)
  *   ICE_SERVERS      JSON de serveurs STUN/TURN pour le vocal (optionnel)
  *   SUPABASE_URL / SUPABASE_SECRET_KEY   base de comptes Supabase (voir supabase/schema.sql)
- *   SOCKET_PATH_KEY  si défini, Socket.io n'est joignable QUE sur /<clé>/socket.io (injecté par le proxy Vercel).
- *                    Combiné à API_PROXY_KEY : l'URL Hugging Face seule ne sert plus à rien (tout répond 404).
+ *   SOCKET_PATH_KEY  ⚠️ NE PAS UTILISER avec le mod natif actuel (il se connecte en dur sur /socket.io).
+ *   ENABLE_DASHBOARD par défaut ACTIVÉ (menu du jeu public/index.html servi sur / et /launcher, comme avant) ; "false" pour couper.
  */
 
-try { require('dotenv').config(); } catch (e) { /* dotenv optionnel : sur Hugging Face les Secrets sont déjà des variables d'environnement */ }
+try { require('dotenv').config({ path: process.env.DOTENV_CONFIG_PATH || undefined, quiet: true }); } catch (e) { /* dotenv optionnel : sur Hugging Face les Secrets sont déjà des variables d'environnement */ }
 
 const express = require('express');
 const http = require('http');
@@ -59,7 +59,8 @@ const API_PROXY_KEY = process.env.API_PROXY_KEY || '';
 const SOCKET_PATH_KEY = (process.env.SOCKET_PATH_KEY || '').replace(/[^A-Za-z0-9_-]/g, '');
 const SOCKET_PATH = SOCKET_PATH_KEY ? `/${SOCKET_PATH_KEY}/socket.io` : '/socket.io';
 const ADMIN_KEY = process.env.ADMIN_KEY || '';
-const ENABLE_DASHBOARD = String(process.env.ENABLE_DASHBOARD || '').toLowerCase() === 'true';
+// Comme l'ancien serveur : le menu du jeu (public/index.html) est servi par défaut. ENABLE_DASHBOARD=false pour le couper.
+const ENABLE_DASHBOARD = String(process.env.ENABLE_DASHBOARD || 'true').toLowerCase() !== 'false';
 
 let ICE_SERVERS = [{ urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] }];
 try {
@@ -303,11 +304,10 @@ app.get('/api/stats', async (req, res) => {
   });
 });
 
-// Launcher Android (fichier peut ne pas exister)
+// Launcher Android : l'APK charge ".../launcher". launcher.html s'il existe, sinon le menu index.html (qui contient le pont Android).
 app.get('/launcher', (req, res) => {
   const f = path.join(__dirname, 'public', 'launcher.html');
-  if (fs.existsSync(f)) return res.sendFile(f);
-  return res.status(404).send('Not found');
+  res.sendFile(fs.existsSync(f) ? f : path.join(__dirname, 'public', 'index.html'));
 });
 
 if (ENABLE_DASHBOARD) {
@@ -327,6 +327,7 @@ app.use((req, res) => res.status(404).json({ error: 'Not found' }));
 io.use((socket, next) => {
   const token = socket.handshake.auth?.token || socket.handshake.query?.token;
   socket.user = null;
+  socket.data.web = socket.handshake.auth?.client === 'web'; // le site Next.js ; le mod natif ne l'est pas
   if (token) {
     try { socket.user = jwt.verify(String(token), JWT_SECRET); } catch (e) { socket.user = null; }
   }
@@ -352,11 +353,14 @@ function membersOf(room) {
     muted: !!p.muted,
   }));
 }
+// Les événements "site" (membres, bans, chat, vocal) ne vont QU'AUX clients web (salle socket.io "web:<roomId>").
+// Le mod natif analyse les trames par recherche de texte : il doit recevoir exactement les mêmes trames qu'avant.
+const webRoom = (room) => `web:${room.id}`;
 function emitMembers(room) {
-  io.to(room.id).emit('roomMembers', { roomId: room.id, hostId: room.hostId, members: membersOf(room) });
+  io.to(webRoom(room)).emit('roomMembers', { roomId: room.id, hostId: room.hostId, members: membersOf(room) });
 }
 function emitBans(room) {
-  if (!room.hostId) return;
+  if (!room.hostId || !io.sockets.sockets.get(room.hostId)?.data.web) return;
   io.to(room.hostId).emit('roomBans', {
     roomId: room.id,
     bans: Array.from(room.bans.entries()).map(([key, name]) => ({ key, name })),
@@ -366,8 +370,6 @@ function emitBans(room) {
 function joinRoomInternal(sock, roomId, { password, mapId, busId, username, pseudo, vehicleId, skinId, busInfo }) {
   const room = rooms.get(roomId);
   if (!room) return { ok: false, error: 'Room introuvable.' };
-
-  if (sock.data.roomId === room.id && room.players.has(sock.id)) return { ok: true, room: publicRoom(room) };
 
   const finalUsername = cleanText(sock.user?.username || sock.user?.pseudo || username || pseudo || `Joueur_${sock.id.slice(0, 5)}`, 24);
   const userId = sock.user?.id || genId('user');
@@ -404,6 +406,7 @@ function joinRoomInternal(sock, roomId, { password, mapId, busId, username, pseu
   };
   room.players.set(sock.id, player);
   sock.join(room.id);
+  if (sock.data.web) sock.join(webRoom(room));
   sock.data.roomId = room.id;
 
   sock.to(room.id).emit('playerJoined', {
@@ -429,7 +432,6 @@ function joinRoomInternal(sock, roomId, { password, mapId, busId, username, pseu
         skinId: p.skinId,
         busInfo: p.busInfo,
         transform: p.transform,
-        inVoice: !!p.inVoice,
       })),
   });
 
@@ -448,8 +450,9 @@ function removeFromRoom(sock) {
   const leaving = room.players.get(sock.id);
   room.players.delete(sock.id);
   sock.leave(room.id);
+  sock.leave(webRoom(room));
 
-  if (leaving?.inVoice) sock.to(room.id).emit('voice:peer-left', { socketId: sock.id });
+  if (leaving?.inVoice) sock.to(webRoom(room)).emit('voice:peer-left', { socketId: sock.id });
   sock.to(room.id).emit('playerLeft', {
     socketId: sock.id,
     userId: leaving?.userId,
@@ -486,7 +489,7 @@ io.on('connection', (socket) => {
   let winStart = Date.now();
   let winCount = 0;
   socket.use(([event], next) => {
-    if (event === 'vehicleUpdate') return next();
+    if (event === 'vehicleUpdate' || event === 'voiceState') return next();
     const now = Date.now();
     if (now - winStart > 5000) { winStart = now; winCount = 0; }
     if (++winCount > 40) return next(new Error('RATE_LIMITED'));
@@ -654,10 +657,10 @@ io.on('connection', (socket) => {
     if (room.hostId !== socket.id) return ack({ ok: false, error: 'Réservé au créateur de la room.' });
 
     const hostName = room.players.get(socket.id)?.username || '';
-    socket.to(room.id).emit('roomClosed', { roomId: room.id, roomName: room.name, by: hostName });
+    socket.to(webRoom(room)).emit('roomClosed', { roomId: room.id, roomName: room.name, by: hostName });
     for (const sid of Array.from(room.players.keys())) {
       const s = io.sockets.sockets.get(sid);
-      if (s) { s.data.roomId = null; s.leave(room.id); }
+      if (s) { s.data.roomId = null; s.leave(room.id); s.leave(webRoom(room)); }
     }
     rooms.delete(room.id);
     io.emit('roomList', publicRoomList());
@@ -671,7 +674,7 @@ io.on('connection', (socket) => {
     if (!room || !player) return;
     const text = cleanText(payload?.text, 300);
     if (!text) return;
-    io.to(room.id).emit('roomChat', {
+    io.to(webRoom(room)).emit('roomChat', {
       id: genId('msg'),
       socketId: socket.id,
       username: player.username,
@@ -692,7 +695,7 @@ io.on('connection', (socket) => {
       .filter((p) => p.socketId !== socket.id && p.inVoice)
       .map((p) => ({ socketId: p.socketId, username: p.username }));
     ack({ ok: true, peers, iceServers: ICE_SERVERS });
-    socket.to(room.id).emit('voice:peer-joined', { socketId: socket.id, username: player.username });
+    socket.to(webRoom(room)).emit('voice:peer-joined', { socketId: socket.id, username: player.username });
     emitMembers(room);
   });
 
@@ -702,7 +705,7 @@ io.on('connection', (socket) => {
     if (!room || !player || !player.inVoice) return;
     player.inVoice = false;
     player.muted = false;
-    socket.to(room.id).emit('voice:peer-left', { socketId: socket.id });
+    socket.to(webRoom(room)).emit('voice:peer-left', { socketId: socket.id });
     emitMembers(room);
   });
 

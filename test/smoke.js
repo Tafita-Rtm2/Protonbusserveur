@@ -12,7 +12,7 @@ const once = (s, ev, ms = 1500) => new Promise((res) => { const t = setTimeout((
 
 (async () => {
   require('fs').rmSync('/tmp/users.json', { force: true });
-  const srv = spawn('node', ['server.js'], { env: { ...process.env, PORT, API_PROXY_KEY: KEY, JWT_SECRET: 'x'.repeat(40), DATA_DIR: '/tmp', ALLOWED_ORIGINS: 'https://site.test' }, stdio: 'pipe' });
+  const srv = spawn('node', ['server.js'], { env: { ...process.env, DOTENV_CONFIG_PATH: '/nonexistent', PORT, API_PROXY_KEY: KEY, JWT_SECRET: 'x'.repeat(40), DATA_DIR: '/tmp', ALLOWED_ORIGINS: 'https://site.test' }, stdio: 'pipe' });
   srv.stdout.on('data', () => {}); srv.stderr.on('data', (d) => process.stderr.write(d));
   await sleep(1200);
 
@@ -39,9 +39,9 @@ const once = (s, ev, ms = 1500) => new Promise((res) => { const t = setTimeout((
 
   console.log('Multijoueur (compat mod sans token + comptes)');
   const mod = await conn({});                 // comme le mod actuel : pas de token
-  const alice = await conn({ token: tokA });
-  const bob = await conn({ token: tokB });
-  const chloe = await conn({ token: tokC });
+  const alice = await conn({ token: tokA, client: 'web' });
+  const bob = await conn({ token: tokB, client: 'web' });
+  const chloe = await conn({ token: tokC, client: 'web' });
   const created = await emit(alice, 'createRoom', { roomName: 'Tana Express', mapId: 'map_tana', busId: 'bus_default', maxPlayers: 4, password: 'pw' });
   ok(created.ok && created.room.hostUsername === 'Alice', 'Alice crée une room (pseudo du compte)');
   const rid = created.room.id;
