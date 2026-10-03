@@ -1,7 +1,6 @@
 'use client';
 import { GameProvider, useGame } from '@/lib/GameProvider';
 import { AuthScreen } from '@/components/AuthScreen';
-import { AdminDashboard } from '@/components/AdminDashboard';
 import { Lobby } from '@/components/Lobby';
 import { RoomView } from '@/components/RoomView';
 import { Toasts } from '@/components/Toasts';
@@ -17,8 +16,7 @@ function App() {
       </div>
     );
   }
-  if (!user) return <AuthScreen />;
-  if (user.role === 'admin') return <AdminDashboard />;
+  if (!user || user.role === 'admin') return <AuthScreen />;
   return roomId ? <RoomView /> : <Lobby />;
 }
 
