@@ -39,6 +39,13 @@ if (!JWT_SECRET) {
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '')
   .split(',').map((s) => s.trim().replace(/\/$/, '')).filter(Boolean);
 const REQUIRE_AUTH = String(process.env.REQUIRE_AUTH || '').toLowerCase() === 'true';
+const HMAC_SHARED_SECRET = process.env.HMAC_SHARED_SECRET || '';
+const REQUIRE_HMAC_SIG = String(process.env.REQUIRE_HMAC_SIG || '').toLowerCase() === 'true';
+
+if (!HMAC_SHARED_SECRET) {
+  console.warn('[Secu] ⚠️ HMAC_SHARED_SECRET non défini dans l\'environnement.');
+}
+
 const API_PROXY_KEY = process.env.API_PROXY_KEY || '';
 const SOCKET_PATH = '/socket.io';
 const ENABLE_DASHBOARD = String(process.env.ENABLE_DASHBOARD || 'true').toLowerCase() !== 'false';
@@ -59,6 +66,145 @@ function safeEqual(a, b) {
   const x = Buffer.from(String(a || ''));
   const y = Buffer.from(String(b || ''));
   return x.length === y.length && crypto.timingSafeEqual(x, y);
+}
+
+// ------------------------------------------------------------------
+// Sécurité : Throttled Logging & Vérification HMAC
+// ------------------------------------------------------------------
+const secuLogHistory = new Map();
+function logSecuThrottled(key, message, intervalMs = 5000) {
+  const now = Date.now();
+  const last = secuLogHistory.get(key) || 0;
+  if (now - last > intervalMs) {
+    secuLogHistory.set(key, now);
+    console.warn(`[Secu] ${message}`);
+  }
+}
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [k, ts] of secuLogHistory.entries()) {
+    if (now - ts > 60000) secuLogHistory.delete(k);
+  }
+}, 60000).unref();
+
+function verifyHmacSignature(eventType, payload, defaultRoomId = '') {
+  if (!HMAC_SHARED_SECRET) {
+    return { ok: false, reason: 'NO_SECRET_CONFIGURED' };
+  }
+
+  if (!payload || typeof payload !== 'object') {
+    return { ok: false, reason: 'PAYLOAD_INVALID' };
+  }
+
+  const { timestamp, sig } = payload;
+  if (sig === undefined || sig === null || timestamp === undefined || timestamp === null) {
+    return { ok: false, reason: 'MISSING_SIG_OR_TIMESTAMP' };
+  }
+
+  const tsNum = Number(timestamp);
+  if (isNaN(tsNum)) {
+    return { ok: false, reason: 'INVALID_TIMESTAMP_FORMAT' };
+  }
+
+  const nowSec = Math.floor(Date.now() / 1000);
+  if (Math.abs(nowSec - tsNum) > 15) {
+    return { ok: false, reason: `TIMESTAMP_OUT_OF_BOUNDS (diff: ${Math.abs(nowSec - tsNum)}s)` };
+  }
+
+  let canonicalStr = '';
+  if (eventType === 'createRoom') {
+    const roomName = payload.roomName ?? payload.name ?? '';
+    const mapId = payload.mapId ?? '';
+    const busId = payload.busId ?? '';
+    const pseudo = payload.pseudo ?? payload.username ?? '';
+    canonicalStr = `${roomName}|${mapId}|${busId}|${pseudo}|${tsNum}`;
+  } else if (eventType === 'joinRoom') {
+    const roomId = payload.roomId ?? defaultRoomId ?? '';
+    const pseudo = payload.pseudo ?? payload.username ?? '';
+    canonicalStr = `${roomId}|${pseudo}|${tsNum}`;
+  } else if (eventType === 'vehicleUpdate') {
+    const roomId = payload.roomId ?? defaultRoomId ?? '';
+    const x = payload.x ?? payload.position?.x ?? 0;
+    const y = payload.y ?? payload.position?.y ?? 0;
+    const z = payload.z ?? payload.position?.z ?? 0;
+    const rotX = payload.rotX ?? payload.rotation?.x ?? 0;
+    const rotY = payload.rotY ?? payload.rotation?.y ?? 0;
+    const rotZ = payload.rotZ ?? payload.rotation?.z ?? 0;
+    const rotW = payload.rotW ?? payload.rotation?.w ?? 1;
+    canonicalStr = `${roomId}|${x}|${y}|${z}|${rotX}|${rotY}|${rotZ}|${rotW}|${tsNum}`;
+  } else {
+    return { ok: false, reason: 'UNKNOWN_EVENT_TYPE' };
+  }
+
+  const expectedSig = crypto
+    .createHmac('sha256', HMAC_SHARED_SECRET)
+    .update(canonicalStr)
+    .digest('hex')
+    .toLowerCase();
+
+  const receivedSig = String(sig).trim().toLowerCase();
+
+  const bufExpected = Buffer.from(expectedSig);
+  const bufReceived = Buffer.from(receivedSig);
+
+  if (bufExpected.length !== bufReceived.length || !crypto.timingSafeEqual(bufExpected, bufReceived)) {
+    return { ok: false, reason: 'SIGNATURE_MISMATCH', canonicalStr, expectedSig, receivedSig };
+  }
+
+  return { ok: true };
+}
+
+// Rate Limiting & Validation Niveau 3
+const roomCreationRateLimit = new Map();
+function checkRoomCreationLimit(key, maxPerMinute = 5) {
+  const now = Date.now();
+  let history = roomCreationRateLimit.get(key) || [];
+  history = history.filter((ts) => now - ts < 60000);
+  if (history.length >= maxPerMinute) {
+    return false;
+  }
+  history.push(now);
+  roomCreationRateLimit.set(key, history);
+  return true;
+}
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, history] of roomCreationRateLimit.entries()) {
+    const filtered = history.filter((ts) => now - ts < 60000);
+    if (filtered.length === 0) roomCreationRateLimit.delete(key);
+    else roomCreationRateLimit.set(key, filtered);
+  }
+}, 60000).unref();
+
+function checkVehicleUpdateRateLimit(socket) {
+  const now = Date.now();
+  if (!socket.data.updateRateHistory) {
+    socket.data.updateRateHistory = { windowStart: now, count: 0 };
+  }
+  const history = socket.data.updateRateHistory;
+  if (now - history.windowStart > 1000) {
+    history.windowStart = now;
+    history.count = 1;
+    return true;
+  }
+  history.count += 1;
+  if (history.count > 35) {
+    return false;
+  }
+  return true;
+}
+
+function validatePayloadSize(payload, maxKeys = 30, maxStringLen = 500) {
+  if (!payload || typeof payload !== 'object') return false;
+  const keys = Object.keys(payload);
+  if (keys.length > maxKeys) return false;
+  for (const k of keys) {
+    const val = payload[k];
+    if (typeof val === 'string' && val.length > maxStringLen) return false;
+  }
+  return true;
 }
 
 // ------------------------------------------------------------------
@@ -701,6 +847,25 @@ io.on('connection', (socket) => {
   socket.on('createRoom', (payload, callback) => {
     const ack = typeof callback === 'function' ? callback : () => {};
     try {
+      if (!validatePayloadSize(payload, 30, 500)) {
+        logSecuThrottled(`createRoom_size_${socket.id}`, `Socket ${socket.id} - Payload createRoom invalide ou trop grand.`);
+        return ack({ ok: false, error: 'Payload invalide ou trop volumineux.' });
+      }
+
+      const ip = socket.handshake.address || socket.id;
+      if (!checkRoomCreationLimit(socket.id) || !checkRoomCreationLimit(ip)) {
+        logSecuThrottled(`createRoom_rate_${socket.id}`, `Socket ${socket.id} (${ip}) - Limit room creation dépassé.`);
+        return ack({ ok: false, error: 'Trop de tentatives de création de salons. Veuillez patienter.' });
+      }
+
+      const hmacResult = verifyHmacSignature('createRoom', payload);
+      if (!hmacResult.ok) {
+        logSecuThrottled(`createRoom_hmac_${socket.id}`, `Signature HMAC createRoom invalid/refused pour ${socket.id}: ${hmacResult.reason}`);
+        if (REQUIRE_HMAC_SIG) {
+          return ack({ ok: false, error: 'Signature HMAC invalide ou expirée.', code: 'INVALID_HMAC' });
+        }
+      }
+
       const { roomName, name, isPrivate, password, mapId, busId, maxPlayers, username: pu, pseudo: pp } = payload || {};
       const username = socket.user?.username || socket.user?.pseudo || pu || pp || `Joueur_${socket.id.slice(0, 5)}`;
 
@@ -742,8 +907,22 @@ io.on('connection', (socket) => {
   socket.on('joinRoom', (payload, callback) => {
     const ack = typeof callback === 'function' ? callback : () => {};
     try {
+      if (!validatePayloadSize(payload, 30, 500)) {
+        logSecuThrottled(`joinRoom_size_${socket.id}`, `Socket ${socket.id} - Payload joinRoom invalide ou trop grand.`);
+        return ack({ ok: false, error: 'Payload invalide ou trop volumineux.' });
+      }
+
       const { roomId } = payload || {};
       if (!roomId) return ack({ ok: false, error: 'roomId requis.' });
+
+      const hmacResult = verifyHmacSignature('joinRoom', payload, String(roomId));
+      if (!hmacResult.ok) {
+        logSecuThrottled(`joinRoom_hmac_${socket.id}`, `Signature HMAC joinRoom invalid/refused pour ${socket.id}: ${hmacResult.reason}`);
+        if (REQUIRE_HMAC_SIG) {
+          return ack({ ok: false, error: 'Signature HMAC invalide ou expirée.', code: 'INVALID_HMAC' });
+        }
+      }
+
       if (socket.data.roomId && socket.data.roomId !== roomId) removeFromRoom(socket);
 
       const result = joinRoomInternal(socket, String(roomId), payload || {});
@@ -918,12 +1097,32 @@ io.on('connection', (socket) => {
     const player = room.players.get(socket.id);
     if (!player) return;
 
+    if (!validatePayloadSize(payload, 50, 500)) {
+      logSecuThrottled(`vUpd_size_${socket.id}`, `Socket ${socket.id} - Payload vehicleUpdate invalide ou trop grand.`);
+      return;
+    }
+
+    if (!checkVehicleUpdateRateLimit(socket)) {
+      logSecuThrottled(`vUpd_rate_${socket.id}`, `Socket ${socket.id} - Rate limit vehicleUpdate dépassé (>35msg/s).`);
+      return;
+    }
+
+    const hmacResult = verifyHmacSignature('vehicleUpdate', payload, room.id);
+    if (!hmacResult.ok) {
+      logSecuThrottled(`vUpd_hmac_${socket.id}`, `Signature HMAC vehicleUpdate invalid/refused pour ${socket.id}: ${hmacResult.reason}`);
+      if (REQUIRE_HMAC_SIG) {
+        return;
+      }
+    }
+
     const now = Date.now();
     if (now - player.lastUpdateTs < MIN_TICK_INTERVAL_MS) return;
     player.lastUpdateTs = now;
 
     if (!payload || typeof payload !== 'object') return;
-    const { position, rotation, controls } = payload;
+    const position = payload.position || (payload.x !== undefined ? { x: payload.x, y: payload.y, z: payload.z } : null);
+    const rotation = payload.rotation || (payload.rotX !== undefined ? { x: payload.rotX, y: payload.rotY, z: payload.rotZ, w: payload.rotW } : null);
+    const controls = payload.controls;
     if (!position || !rotation) return;
 
     const ctrl = controls || {};
@@ -932,8 +1131,8 @@ io.on('connection', (socket) => {
     const brake = Number(ctrl.brake ?? payload.brake) || 0;
     const handbrake = Number(ctrl.handbrake ?? payload.handbrake) || 0;
 
-    if (payload.vehicleId) player.vehicleId = String(payload.vehicleId);
-    if (payload.skinId) player.skinId = String(payload.skinId);
+    if (payload.vehicleId) player.vehicleId = cleanText(payload.vehicleId, 80);
+    if (payload.skinId) player.skinId = cleanText(payload.skinId, 80);
     const cleanedBusInfo = cleanBusInfo(payload.busInfo);
     if (cleanedBusInfo) player.busInfo = cleanedBusInfo;
 
