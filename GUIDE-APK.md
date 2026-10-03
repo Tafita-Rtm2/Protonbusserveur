@@ -78,7 +78,7 @@ ou ouvrir le fichier → "Raw" → "Enregistrer sous").
   [ProtonBusSync] native_init() a démarré sans exception.
   ```
 - Le menu Offline/Online (Tâche 3) doit apparaître au lancement.
-- `https://tafitaniaina-tvserveur.hf.space/api/stats` (ou l'URL du serveur mis
+- `<adresse-du-serveur>/api/stats` (ou l'URL du serveur mis
   à jour si `Protonbusserveur` diffère) doit monter à 1 connexion une fois
   connecté en mode Online.
 

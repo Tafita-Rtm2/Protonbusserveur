@@ -16,7 +16,7 @@ contrôle strict de compatibilité map/bus, et synchronisation de position à
 30 ticks/sec max.
 
 Ce dépôt se synchronise automatiquement vers le Space Hugging Face
-(`Tafitaniaina/TVserveur`) à chaque push sur `main`, via
+(Space privé, non nommé ici) à chaque push sur `main`, via
 `.github/workflows/deploy-to-hf.yml`.
 
 ## Structure (v2)

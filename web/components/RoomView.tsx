@@ -2,7 +2,7 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   Ban, Bus, Check, Copy, Crown, DoorOpen, Headphones, Loader2, Lock, Map as MapIcon, MessageCircle, Mic, MicOff,
-  Gamepad2, Phone, PhoneOff, Play, Send, ShieldAlert, Trash2, UserMinus, Users, Volume2,
+  Phone, PhoneOff, Send, ShieldAlert, Trash2, UserMinus, Users, Volume2,
 } from 'lucide-react';
 import { useGame } from '@/lib/GameProvider';
 import { useVoice } from '@/lib/useVoice';
@@ -14,7 +14,7 @@ import { Modal } from './Modal';
 type Confirm = { kind: 'kick' | 'ban' | 'close'; member?: Member } | null;
 
 export function RoomView() {
-  const { socket, room, roomId, members, bans, chat, gameStarted, isHost, leaveRoom, startGame, kick, ban, unban, closeRoom, sendChat, launchGame } = useGame();
+  const { socket, room, roomId, members, bans, chat, isHost, leaveRoom, kick, ban, unban, closeRoom, sendChat } = useGame();
   const voice = useVoice(socket, roomId);
   const [confirm, setConfirm] = useState<Confirm>(null);
   const [copied, setCopied] = useState(false);
@@ -57,21 +57,12 @@ export function RoomView() {
         <div className="flex flex-wrap items-center gap-2">
           {isHost && (
             <>
-              <button onClick={startGame} className="btn-success"><Play size={16} />Lancer la partie</button>
               <button onClick={() => setConfirm({ kind: 'close' })} className="btn-danger"><Trash2 size={16} /><span className="hidden sm:inline">Détruire la room</span></button>
             </>
           )}
-          <button onClick={launchGame} className="btn-ghost" title="Ouvre le jeu et rejoint cette room"><Gamepad2 size={16} />Ouvrir le jeu</button>
           <button onClick={leaveRoom} className="btn-ghost"><DoorOpen size={16} />Quitter</button>
         </div>
       </header>
-
-      {gameStarted && (
-        <div className="mt-4 animate-pop rounded-2xl border border-emerald-400/30 bg-emerald-500/10 px-5 py-4 text-emerald-200">
-          <div className="flex items-center gap-3 font-semibold"><Play size={18} />La partie a démarré !</div>
-          <p className="mt-1 text-sm text-emerald-200/80">Ouvre Proton Bus Simulator sur ton appareil : tu retrouveras les autres joueurs de cette room.</p>
-        </div>
-      )}
 
       <div className="mt-5 grid flex-1 gap-5 lg:grid-cols-[minmax(0,1fr)_400px]">
         {/* Colonne gauche : joueurs + vocal */}

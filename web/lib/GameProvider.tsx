@@ -21,7 +21,6 @@ type Ctx = {
   members: Member[];
   bans: BanEntry[];
   chat: ChatMsg[];
-  gameStarted: boolean;
   isHost: boolean;
   toasts: Toast[];
   login: (u: string, p: string) => Promise<string | null>;
@@ -31,13 +30,11 @@ type Ctx = {
   createRoom: (o: CreateOpts) => Promise<string | null>;
   joinRoom: (id: string, password?: string) => Promise<string | null>;
   leaveRoom: () => void;
-  startGame: () => void;
   kick: (socketId: string) => void;
   ban: (socketId: string) => void;
   unban: (key: string) => void;
   closeRoom: () => void;
   sendChat: (text: string) => void;
-  launchGame: () => void;
   dismissToast: (id: number) => void;
 };
 
@@ -75,7 +72,6 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
   const [members, setMembers] = useState<Member[]>([]);
   const [bans, setBans] = useState<BanEntry[]>([]);
   const [chat, setChat] = useState<ChatMsg[]>([]);
-  const [gameStarted, setGameStarted] = useState(false);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const roomIdRef = useRef<string | null>(null);
   const roomInfoRef = useRef<RoomInfo | null>(null);
@@ -94,7 +90,7 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
   const dismissToast = useCallback((id: number) => setToasts((t) => t.filter((x) => x.id !== id)), []);
 
   const resetRoom = useCallback(() => {
-    setRoomId(null); setRoomInfo(null); setHostId(null); setMembers([]); setBans([]); setChat([]); setGameStarted(false);
+    setRoomId(null); setRoomInfo(null); setHostId(null); setMembers([]); setBans([]); setChat([]);
   }, []);
 
   // --- Session au chargement -------------------------------------------------
@@ -151,12 +147,6 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
         setRoomInfo(d.room);
         toast('info', `${d.newHostUsername} est maintenant le créateur de la room.`);
       });
-      const started = () => {
-        setGameStarted(true);
-        if (launchRef.current()) toast('success', '🚀 La partie démarre : lancement du jeu…');
-        else toast('success', '🚀 La partie démarre ! Ouvre le jeu depuis le Launcher Android.');
-      };
-      s.on('GAME_STARTED', started);
       s.on('kicked', (d: { roomName: string; banned: boolean }) => {
         resetRoom();
         toast('error', d.banned ? `Tu as été banni de « ${d.roomName} ».` : `Tu as été expulsé de « ${d.roomName} ».`);
@@ -208,7 +198,7 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
 
   const enter = useCallback((r: Ack) => {
     if (!r.ok || !r.room) return r.error || 'Erreur.';
-    setChat([]); setGameStarted(false);
+    setChat([]);
     setRoomId(r.room.id); setRoomInfo(r.room); setHostId(r.room.hostId);
     // Comme l'ancien menu : dès qu'on entre dans un salon, on donne pseudo/roomId/mapId/busId au jeu (AndroidHost.launchGame)
     // pour que le mod rejoigne le salon et affiche les voitures. Sans cet appel le mod reste connecté mais "sans salon".
@@ -233,32 +223,18 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
   }, [emitAck, enter]);
 
   const leaveRoom = useCallback(() => { socket?.emit('leaveRoom', () => {}); resetRoom(); }, [socket, resetRoom]);
-  const startGame = useCallback(async () => {
-    const r = await emitAck('startGame', {});
-    if (!r.ok) toast('error', r.error || 'Impossible de démarrer.');
-  }, [emitAck, toast]);
   const kick = useCallback(async (id: string) => { const r = await emitAck('kickPlayer', { socketId: id }); if (!r.ok) toast('error', r.error || 'Échec.'); }, [emitAck, toast]);
   const ban = useCallback(async (id: string) => { const r = await emitAck('banPlayer', { socketId: id }); if (!r.ok) toast('error', r.error || 'Échec.'); }, [emitAck, toast]);
   const unban = useCallback(async (key: string) => { const r = await emitAck('unbanPlayer', { key }); if (!r.ok) toast('error', r.error || 'Échec.'); }, [emitAck, toast]);
   const closeRoom = useCallback(async () => { const r = await emitAck('closeRoom', {}); if (r.ok) { resetRoom(); toast('success', 'Room fermée.'); } else toast('error', r.error || 'Échec.'); }, [emitAck, toast, resetRoom]);
-  const launchGame = useCallback(() => {
-    const r = roomInfoRef.current; const u = userRef.current;
-    if (!r || !u) return false;
-    const ok = android.launch({ pseudo: u.username, roomId: r.id, mapId: r.mapId, busId: r.busId });
-    if (!ok) toast('info', "Ouvre cette page depuis l'application Launcher Proton Bus Sync pour lancer le jeu.");
-    return ok;
-  }, [toast]);
-  const launchRef = useRef<() => boolean>(() => false);
-  useEffect(() => { launchRef.current = launchGame; }, [launchGame]);
-
   const sendChat = useCallback((text: string) => { socket?.emit('roomChat', { text }); }, [socket]);
 
   const value = useMemo<Ctx>(() => ({
-    booting, user, connected, socket, rooms, room: roomInfo, roomId, members, bans, chat, gameStarted,
+    booting, user, connected, socket, rooms, room: roomInfo, roomId, members, bans, chat,
     isHost: !!socket?.id && hostId === socket.id, toasts,
-    login, register, logout, refreshRooms, createRoom, joinRoom, leaveRoom, startGame, kick, ban, unban, closeRoom, sendChat, launchGame: () => { launchGame(); }, dismissToast,
-  }), [booting, user, connected, socket, rooms, roomInfo, roomId, members, bans, chat, gameStarted, hostId, toasts,
-    login, register, logout, refreshRooms, createRoom, joinRoom, leaveRoom, startGame, kick, ban, unban, closeRoom, sendChat, launchGame, dismissToast]);
+    login, register, logout, refreshRooms, createRoom, joinRoom, leaveRoom, kick, ban, unban, closeRoom, sendChat, dismissToast,
+  }), [booting, user, connected, socket, rooms, roomInfo, roomId, members, bans, chat, hostId, toasts,
+    login, register, logout, refreshRooms, createRoom, joinRoom, leaveRoom, kick, ban, unban, closeRoom, sendChat, dismissToast]);
 
   return <GameCtx.Provider value={value}>{children}</GameCtx.Provider>;
 }
