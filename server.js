@@ -124,14 +124,21 @@ function verifyHmacSignature(eventType, payload, defaultRoomId = '') {
     const pseudo = payload.pseudo ?? payload.username ?? '';
     canonicalStr = `${roomId}|${pseudo}|${tsNum}`;
   } else if (eventType === 'vehicleUpdate') {
+    // IMPORTANT : le client C++ signe les nombres formatés en texte fixe
+    // à 4 décimales ("%.4f", ex: "5.1000"). Le JSON ne conserve jamais les
+    // zéros de fin ({"x":5.1000} -> nombre JS 5.1), donc un simple ${x}
+    // ici donnerait "5.1" et ferait échouer la vérification à chaque fois.
+    // On doit reformater chaque nombre en 4 décimales fixes pour retomber
+    // exactement sur la même chaîne que celle signée côté jeu.
+    const fixed4 = (v) => Number(v ?? 0).toFixed(4);
     const roomId = payload.roomId ?? defaultRoomId ?? '';
-    const x = payload.x ?? payload.position?.x ?? 0;
-    const y = payload.y ?? payload.position?.y ?? 0;
-    const z = payload.z ?? payload.position?.z ?? 0;
-    const rotX = payload.rotX ?? payload.rotation?.x ?? 0;
-    const rotY = payload.rotY ?? payload.rotation?.y ?? 0;
-    const rotZ = payload.rotZ ?? payload.rotation?.z ?? 0;
-    const rotW = payload.rotW ?? payload.rotation?.w ?? 1;
+    const x = fixed4(payload.x ?? payload.position?.x);
+    const y = fixed4(payload.y ?? payload.position?.y);
+    const z = fixed4(payload.z ?? payload.position?.z);
+    const rotX = fixed4(payload.rotX ?? payload.rotation?.x);
+    const rotY = fixed4(payload.rotY ?? payload.rotation?.y);
+    const rotZ = fixed4(payload.rotZ ?? payload.rotation?.z);
+    const rotW = fixed4(payload.rotW ?? payload.rotation?.w ?? 1);
     canonicalStr = `${roomId}|${x}|${y}|${z}|${rotX}|${rotY}|${rotZ}|${rotW}|${tsNum}`;
   } else {
     return { ok: false, reason: 'UNKNOWN_EVENT_TYPE' };
