@@ -1,8 +1,8 @@
 /**
  * Couche base de données des clés d'accès.
- * - SUPABASE_URL + SUPABASE_SECRET_KEY -> Supabase (recommandé) : clés persistantes.
+ * - SUPABASE_URL + SUPABASE_SECRET_KEY -> Supabase (recommandé) : clés ultra-persistantes.
  * - DATABASE_URL                        -> PostgreSQL direct (Neon, etc.).
- * - Sinon                               -> repli sur un fichier JSON local (keys.json).
+ * - Fichier JSON local (keys.json)      -> Miroir de secours permanent.
  */
 const fs = require('fs');
 const path = require('path');
@@ -12,11 +12,11 @@ const JSON_FILE = path.join(process.env.DATA_DIR || __dirname, 'keys.json');
 let pool = null;
 let sb = null;
 let mode = 'json';
-const mem = new Map(); // repli JSON : key_code -> key object
+const mem = new Map(); // key_code -> key object
 
 const keyOf = (k) => String(k || '').trim();
 
-// ---------------------------------------------------------------- JSON
+// ---------------------------------------------------------------- JSON local
 function loadJson() {
   try {
     if (!fs.existsSync(JSON_FILE)) return;
@@ -76,9 +76,17 @@ async function initPostgres() {
   pool.on('error', (e) => console.error('[DB] pool error:', e.message));
   await pool.query(SCHEMA);
 
-  const { rows } = await pool.query('SELECT COUNT(*)::int AS n FROM keys');
-  if (rows[0].n === 0) {
-    loadJson();
+  loadJson();
+
+  // Importer les clés de BDD vers la mémoire locale et synchro JSON
+  const { rows } = await pool.query('SELECT * FROM keys');
+  if (rows && rows.length > 0) {
+    for (const r of rows) {
+      const k = rowToKey(r);
+      mem.set(k.keyCode, k);
+    }
+    saveJson();
+  } else if (mem.size > 0) {
     for (const item of mem.values()) {
       await pool.query(
         `INSERT INTO keys (id, key_code, player_name, expires_at, created_at)
@@ -86,7 +94,7 @@ async function initPostgres() {
         [item.id, item.keyCode, item.playerName, item.expiresAt, item.createdAt]
       );
     }
-    if (mem.size) console.log(`[DB] ${mem.size} ancienne(s) clé(s) importée(s) dans PostgreSQL.`);
+    console.log(`[DB] ${mem.size} clé(s) importée(s) dans PostgreSQL.`);
   }
 }
 
@@ -96,15 +104,24 @@ async function initSupabase() {
   sb = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SECRET_KEY, {
     auth: { persistSession: false, autoRefreshToken: false },
   });
-  const { count, error } = await sb.from('keys').select('id', { count: 'exact', head: true });
+
+  loadJson();
+
+  const { data, error } = await sb.from('keys').select('*');
   if (error) {
     const missing = error.code === 'PGRST205' || /does not exist|schema cache/i.test(error.message || '');
     throw new Error(missing
       ? 'table "keys" absente : exécute supabase/schema.sql dans Supabase → SQL Editor'
       : (error.message || error.code || 'erreur inconnue'));
   }
-  if (count === 0) {
-    loadJson();
+
+  if (data && data.length > 0) {
+    for (const r of data) {
+      const k = rowToKey(r);
+      mem.set(k.keyCode, k);
+    }
+    saveJson();
+  } else if (mem.size > 0) {
     for (const item of mem.values()) {
       await sb.from('keys').insert({
         id: item.id,
@@ -114,7 +131,7 @@ async function initSupabase() {
         created_at: item.createdAt,
       });
     }
-    if (mem.size) console.log(`[DB] ${mem.size} ancienne(s) clé(s) importée(s) dans Supabase.`);
+    console.log(`[DB] ${mem.size} clé(s) importée(s) dans Supabase.`);
   }
 }
 
@@ -142,7 +159,7 @@ async function init() {
       pool = null;
     }
   } else if (!process.env.SUPABASE_URL) {
-    console.warn('[DB] ⚠️ Aucune BDD configurée : clés stockées en JSON.');
+    console.warn('[DB] ⚠️ Aucune BDD configurée : clés stockées en JSON local.');
   }
   loadJson();
   mode = 'json';
@@ -152,14 +169,18 @@ async function init() {
 async function findKeyByCode(keyCode) {
   const k = keyOf(keyCode);
   if (!k) return null;
+
   if (mode === 'supabase') {
-    const { data, error } = await sb.from('keys').select('*').eq('key_code', k).maybeSingle();
-    if (error) throw new Error(error.message);
-    return data ? rowToKey(data) : null;
+    try {
+      const { data, error } = await sb.from('keys').select('*').eq('key_code', k).maybeSingle();
+      if (!error && data) return rowToKey(data);
+    } catch (e) {}
   }
   if (mode === 'postgres') {
-    const { rows } = await pool.query('SELECT * FROM keys WHERE key_code = $1', [k]);
-    return rows[0] ? rowToKey(rows[0]) : null;
+    try {
+      const { rows } = await pool.query('SELECT * FROM keys WHERE key_code = $1', [k]);
+      if (rows && rows[0]) return rowToKey(rows[0]);
+    } catch (e) {}
   }
   return mem.get(k) || null;
 }
@@ -174,6 +195,9 @@ async function createKey(item) {
     createdAt: item.createdAt || Date.now(),
   };
 
+  mem.set(k, keyObj);
+  saveJson();
+
   if (mode === 'supabase') {
     const { error } = await sb.from('keys').insert({
       id: keyObj.id,
@@ -184,7 +208,7 @@ async function createKey(item) {
     });
     if (!error) return { ok: true, key: keyObj };
     if (error.code === '23505') return { ok: false, conflict: true };
-    throw new Error(error.message);
+    console.error('[DB] Erreur création Supabase:', error.message);
   }
   if (mode === 'postgres') {
     try {
@@ -195,56 +219,73 @@ async function createKey(item) {
       return { ok: true, key: keyObj };
     } catch (err) {
       if (err.code === '23505') return { ok: false, conflict: true };
-      throw err;
+      console.error('[DB] Erreur création PostgreSQL:', err.message);
     }
   }
-  if (mem.has(k)) return { ok: false, conflict: true };
-  mem.set(k, keyObj);
-  saveJson();
+
   return { ok: true, key: keyObj };
 }
 
 async function deleteKey(id) {
-  if (mode === 'supabase') {
-    const { error } = await sb.from('keys').delete().eq('id', id);
-    if (error) throw new Error(error.message);
-    return { ok: true };
-  }
-  if (mode === 'postgres') {
-    await pool.query('DELETE FROM keys WHERE id = $1', [id]);
-    return { ok: true };
-  }
   for (const [k, v] of mem.entries()) {
     if (v.id === id) {
       mem.delete(k);
-      saveJson();
       break;
     }
+  }
+  saveJson();
+
+  if (mode === 'supabase') {
+    try {
+      await sb.from('keys').delete().eq('id', id);
+    } catch (e) {}
+  }
+  if (mode === 'postgres') {
+    try {
+      await pool.query('DELETE FROM keys WHERE id = $1', [id]);
+    } catch (e) {}
   }
   return { ok: true };
 }
 
 async function getAllKeys() {
   if (mode === 'supabase') {
-    const { data, error } = await sb.from('keys').select('*').order('created_at', { ascending: false });
-    if (error) throw new Error(error.message);
-    return (data || []).map(rowToKey);
+    try {
+      const { data, error } = await sb.from('keys').select('*').order('created_at', { ascending: false });
+      if (!error && data) {
+        const list = data.map(rowToKey);
+        list.forEach((k) => mem.set(k.keyCode, k));
+        saveJson();
+        return list;
+      }
+    } catch (e) {}
   }
   if (mode === 'postgres') {
-    const { rows } = await pool.query('SELECT * FROM keys ORDER BY created_at DESC');
-    return rows.map(rowToKey);
+    try {
+      const { rows } = await pool.query('SELECT * FROM keys ORDER BY created_at DESC');
+      if (rows) {
+        const list = rows.map(rowToKey);
+        list.forEach((k) => mem.set(k.keyCode, k));
+        saveJson();
+        return list;
+      }
+    } catch (e) {}
   }
   return [...mem.values()].sort((a, b) => b.createdAt - a.createdAt);
 }
 
 async function countKeys() {
   if (mode === 'supabase') {
-    const { count } = await sb.from('keys').select('id', { count: 'exact', head: true });
-    return count || 0;
+    try {
+      const { count } = await sb.from('keys').select('id', { count: 'exact', head: true });
+      if (count !== null) return count;
+    } catch (e) {}
   }
   if (mode === 'postgres') {
-    const { rows } = await pool.query('SELECT COUNT(*)::int AS n FROM keys');
-    return rows[0].n;
+    try {
+      const { rows } = await pool.query('SELECT COUNT(*)::int AS n FROM keys');
+      if (rows && rows[0]) return rows[0].n;
+    } catch (e) {}
   }
   return mem.size;
 }
