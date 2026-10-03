@@ -1,40 +1,51 @@
 'use client';
 import { useState } from 'react';
-import { ArrowRight, Eye, EyeOff, Loader2, Lock, LogIn, Mic, ShieldCheck, User, UserPlus, Users } from 'lucide-react';
+import { ArrowRight, KeyRound, Loader2, Lock, Mic, ShieldAlert, ShieldCheck, Users } from 'lucide-react';
 import { useGame } from '@/lib/GameProvider';
 import { Logo } from './Logo';
 
 const FEATURES = [
-  { icon: Users, title: 'Rooms multijoueur', text: 'Crée ta room ou rejoins tes amis en un clic.' },
-  { icon: Mic, title: 'Vocal intégré', text: 'Discute en direct avec tous les joueurs de la room.' },
-  { icon: ShieldCheck, title: 'Compte sécurisé', text: 'Ton pseudo est unique et te suit dans le jeu.' },
+  { icon: KeyRound, title: 'Clé d\'Accès Unique', text: 'Entrez votre clé fournie par l\'administrateur pour rejoindre le serveur.' },
+  { icon: Users, title: 'Salons Multijoueur', text: 'Créez ou rejoignez des convois multijoueurs en temps réel.' },
+  { icon: Mic, title: 'Vocal P2P Intégré', text: 'Discutez en direct de haute qualité avec les autres chauffeurs.' },
 ];
 
 export function AuthScreen() {
-  const { login, register } = useGame();
-  const [mode, setMode] = useState<'login' | 'register'>('login');
-  const [username, setUsername] = useState('');
-  const [password, setPassword] = useState('');
-  const [confirm, setConfirm] = useState('');
-  const [show, setShow] = useState(false);
+  const { loginWithKey, loginAdmin } = useGame();
+  const [isAdminMode, setIsAdminMode] = useState(false);
+  const [accessKey, setAccessKey] = useState('');
+  const [adminCode, setAdminCode] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const isRegister = mode === 'register';
-
-  async function submit(e: React.FormEvent) {
+  async function handleKeySubmit(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
-    const name = username.trim();
-    if (isRegister) {
-      if (name.length < 3) return setError('Le pseudo doit contenir au moins 3 caractères.');
-      if (password.length < 6) return setError('Le mot de passe doit contenir au moins 6 caractères.');
-      if (password !== confirm) return setError('Les mots de passe ne correspondent pas.');
-    }
+    const key = accessKey.trim();
+    if (!key) return setError('Veuillez saisir votre clé d\'accès.');
+
     setBusy(true);
-    const err = await (isRegister ? register(name, password) : login(name, password));
+    const res = await loginWithKey(key);
     setBusy(false);
-    if (err) setError(err);
+
+    if (res.error) {
+      setError(res.error);
+    }
+  }
+
+  async function handleAdminSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    setError(null);
+    const code = adminCode.trim();
+    if (!code) return setError('Veuillez saisir le code administrateur.');
+
+    setBusy(true);
+    const res = await loginAdmin(code);
+    setBusy(false);
+
+    if (res.error) {
+      setError(res.error);
+    }
   }
 
   return (
@@ -43,16 +54,21 @@ export function AuthScreen() {
       <section className="hidden lg:block">
         <Logo size={56} withText />
         <h1 className="mt-10 text-5xl font-extrabold leading-[1.1] tracking-tight text-white">
-          Conduis ensemble.<br />
-          <span className="bg-gradient-to-r from-brand-300 to-brand-500 bg-clip-text text-transparent">Parle en direct.</span>
+          Proton Bus Sync.<br />
+          <span className="bg-gradient-to-r from-amber-300 to-amber-500 bg-clip-text text-transparent">
+            Conduisez ensemble.
+          </span>
         </h1>
         <p className="mt-5 max-w-md text-lg text-slate-400">
-          Le hub multijoueur de Proton Bus Simulator : crée un compte, monte une room et prends la route avec ta bande.
+          Entrez votre clé d'accès unique pour vous connecter au serveur multijoueur Proton Bus Simulator.
         </p>
+
         <ul className="mt-10 space-y-4">
           {FEATURES.map(({ icon: Icon, title, text }) => (
-            <li key={title} className="glass flex items-center gap-4 p-4">
-              <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-brand-500/15 text-brand-400"><Icon size={22} /></div>
+            <li key={title} className="glass flex items-center gap-4 p-4 rounded-xl border border-white/5">
+              <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-amber-500/15 text-amber-400">
+                <Icon size={22} />
+              </div>
               <div>
                 <div className="font-semibold text-white">{title}</div>
                 <div className="text-sm text-slate-400">{text}</div>
@@ -65,70 +81,120 @@ export function AuthScreen() {
       {/* Formulaire */}
       <section className="mx-auto w-full max-w-md">
         <div className="mb-8 lg:hidden"><Logo size={48} withText /></div>
-        <div className="glass-strong p-7 shadow-2xl sm:p-8">
+
+        <div className="glass-strong p-7 shadow-2xl sm:p-8 rounded-2xl border border-white/10">
+          {/* Commutateur Joueur / Admin */}
           <div className="mb-6 grid grid-cols-2 gap-1 rounded-xl bg-ink-950/60 p-1">
-            {(['login', 'register'] as const).map((m) => (
-              <button
-                key={m}
-                type="button"
-                onClick={() => { setMode(m); setError(null); }}
-                className={`flex items-center justify-center gap-2 rounded-lg py-2.5 text-sm font-semibold transition ${
-                  mode === m ? 'bg-brand-500 text-ink-950 shadow-glow' : 'text-slate-400 hover:text-white'
-                }`}
-              >
-                {m === 'login' ? <LogIn size={16} /> : <UserPlus size={16} />}
-                {m === 'login' ? 'Connexion' : 'Créer un compte'}
-              </button>
-            ))}
+            <button
+              type="button"
+              onClick={() => { setIsAdminMode(false); setError(null); }}
+              className={`flex items-center justify-center gap-2 rounded-lg py-2.5 text-sm font-semibold transition ${
+                !isAdminMode ? 'bg-amber-500 text-ink-950 shadow-glow' : 'text-slate-400 hover:text-white'
+              }`}
+            >
+              <KeyRound size={16} />
+              <span>Clé Joueur</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => { setIsAdminMode(true); setError(null); }}
+              className={`flex items-center justify-center gap-2 rounded-lg py-2.5 text-sm font-semibold transition ${
+                isAdminMode ? 'bg-amber-500 text-ink-950 shadow-glow' : 'text-slate-400 hover:text-white'
+              }`}
+            >
+              <ShieldCheck size={16} />
+              <span>Espace Admin</span>
+            </button>
           </div>
 
-          <h2 className="text-2xl font-bold text-white">{isRegister ? 'Bienvenue à bord 🚌' : 'Content de te revoir'}</h2>
-          <p className="mb-6 mt-1 text-sm text-slate-400">
-            {isRegister ? 'Choisis ton pseudo : c’est le nom que verront les autres joueurs en jeu.' : 'Connecte-toi pour accéder aux rooms.'}
-          </p>
+          {!isAdminMode ? (
+            /* Mode Clé Joueur */
+            <div>
+              <h2 className="text-2xl font-bold text-white">Connexion par Clé 🚌</h2>
+              <p className="mb-6 mt-1 text-sm text-slate-400">
+                Saisissez la clé d'accès unique fournie par votre administrateur.
+              </p>
 
-          <form onSubmit={submit} className="space-y-4" autoComplete="on">
-            <div>
-              <label className="label" htmlFor="u">Pseudo</label>
-              <div className="relative">
-                <User size={18} className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-500" />
-                <input id="u" className="input pl-11" placeholder="Ton pseudo" value={username} onChange={(e) => setUsername(e.target.value)}
-                  autoComplete="username" maxLength={20} autoFocus />
-              </div>
-            </div>
-            <div>
-              <label className="label" htmlFor="p">Mot de passe</label>
-              <div className="relative">
-                <Lock size={18} className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-500" />
-                <input id="p" className="input pl-11 pr-11" type={show ? 'text' : 'password'} placeholder="••••••••" value={password}
-                  onChange={(e) => setPassword(e.target.value)} autoComplete={isRegister ? 'new-password' : 'current-password'} maxLength={100} />
-                <button type="button" onClick={() => setShow(!show)} className="absolute right-2.5 top-1/2 -translate-y-1/2 icon-btn" aria-label="Afficher le mot de passe">
-                  {show ? <EyeOff size={17} /> : <Eye size={17} />}
-                </button>
-              </div>
-            </div>
-            {isRegister && (
-              <div className="animate-pop">
-                <label className="label" htmlFor="c">Confirmer le mot de passe</label>
-                <div className="relative">
-                  <Lock size={18} className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-500" />
-                  <input id="c" className="input pl-11" type={show ? 'text' : 'password'} placeholder="••••••••" value={confirm}
-                    onChange={(e) => setConfirm(e.target.value)} autoComplete="new-password" maxLength={100} />
+              <form onSubmit={handleKeySubmit} className="space-y-4">
+                <div>
+                  <label className="label" htmlFor="k">Clé d'Accès Joueur</label>
+                  <div className="relative">
+                    <KeyRound size={18} className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-500" />
+                    <input
+                      id="k"
+                      className="input pl-11 font-mono uppercase tracking-wider text-amber-300 font-bold"
+                      placeholder="KEY-XXXX-XXXX"
+                      value={accessKey}
+                      onChange={(e) => setAccessKey(e.target.value.toUpperCase())}
+                      maxLength={60}
+                      autoFocus
+                      required
+                    />
+                  </div>
                 </div>
-              </div>
-            )}
 
-            {error && (
-              <div role="alert" className="animate-pop rounded-xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-300">{error}</div>
-            )}
+                {error && (
+                  <div role="alert" className="animate-pop rounded-xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-300 flex items-start gap-2">
+                    <ShieldAlert size={18} className="shrink-0 mt-0.5 text-rose-400" />
+                    <span>{error}</span>
+                  </div>
+                )}
 
-            <button className="btn-primary w-full py-3.5 text-base" disabled={busy || !username || !password}>
-              {busy ? <Loader2 size={18} className="animate-spin" /> : <ArrowRight size={18} />}
-              {busy ? 'Un instant…' : isRegister ? 'Créer mon compte' : 'Se connecter'}
-            </button>
-          </form>
+                <button className="btn-primary w-full py-3.5 text-base" disabled={busy || !accessKey.trim()}>
+                  {busy ? <Loader2 size={18} className="animate-spin" /> : <ArrowRight size={18} />}
+                  {busy ? 'Vérification…' : 'Accéder au Serveur'}
+                </button>
+              </form>
+            </div>
+          ) : (
+            /* Mode Administrateur */
+            <div>
+              <h2 className="text-2xl font-bold text-white flex items-center gap-2">
+                <ShieldCheck size={24} className="text-amber-400" /> Accès Administrateur
+              </h2>
+              <p className="mb-6 mt-1 text-sm text-slate-400">
+                Réservé à l'administrateur pour la création et la gestion des clés.
+              </p>
+
+              <form onSubmit={handleAdminSubmit} className="space-y-4">
+                <div>
+                  <label className="label" htmlFor="ac">Code Administrateur</label>
+                  <div className="relative">
+                    <Lock size={18} className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-500" />
+                    <input
+                      id="ac"
+                      type="password"
+                      className="input pl-11"
+                      placeholder="••••••••••••••••"
+                      value={adminCode}
+                      onChange={(e) => setAdminCode(e.target.value)}
+                      maxLength={100}
+                      autoFocus
+                      required
+                    />
+                  </div>
+                </div>
+
+                {error && (
+                  <div role="alert" className="animate-pop rounded-xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-300 flex items-start gap-2">
+                    <ShieldAlert size={18} className="shrink-0 mt-0.5 text-rose-400" />
+                    <span>{error}</span>
+                  </div>
+                )}
+
+                <button className="btn-primary w-full py-3.5 text-base" disabled={busy || !adminCode.trim()}>
+                  {busy ? <Loader2 size={18} className="animate-spin" /> : <ArrowRight size={18} />}
+                  {busy ? 'Connexion…' : 'Se Connecter en tant qu\'Admin'}
+                </button>
+              </form>
+            </div>
+          )}
         </div>
-        <p className="mt-5 text-center text-xs text-slate-500">Ton compte est le même dans le jeu et sur le site.</p>
+
+        <p className="mt-5 text-center text-xs text-slate-500">
+          Clé unique restreinte à un seul appareil actif à la fois.
+        </p>
       </section>
     </main>
   );

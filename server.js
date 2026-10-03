@@ -1,28 +1,10 @@
 /**
- * Proton Bus Simulator - Serveur Multijoueur (v2)
- * ------------------------------------------------
- * Express (API REST) + Socket.io (temps réel) — prêt pour Hugging Face Spaces (Docker, port 7860).
- *
- * Compatibilité : tous les événements Socket.io historiques utilisés par le mod du jeu sont conservés
- * (createRoom, joinRoom, leaveRoom, startGame, vehicleUpdate, busInfo, roomList, roomState, playerJoined,
- * playerLeft, hostChanged, GAME_STARTED/gameStarted). Les nouveautés sont PUREMENT ADDITIVES :
- * kickPlayer, banPlayer, unbanPlayer, closeRoom, roomChat, voice:*, roomMembers, roomBans.
- *
- * Variables d'environnement (Secrets du Space) :
- *   JWT_SECRET       secret de signature des tokens (OBLIGATOIRE en prod, sinon clé aléatoire à chaque boot)
- *   DATABASE_URL     PostgreSQL (Neon / Supabase ...) -> comptes persistants
- *   ALLOWED_ORIGINS  origines navigateur autorisées, séparées par des virgules (ex: https://mon-site.vercel.app)
- *   API_PROXY_KEY    si défini, /api/login|register|me n'acceptent QUE les appels portant l'en-tête x-proxy-key
- *   REQUIRE_AUTH     "true" => tout socket doit avoir un token valide (à activer quand le mod enverra un token)
- *   ADMIN_KEY        clé pour /api/stats (en-tête x-admin-key)
- *   ENABLE_DASHBOARD "true" => sert le dashboard de test public/ (désactivé par défaut)
- *   ICE_SERVERS      JSON de serveurs STUN/TURN pour le vocal (optionnel)
- *   SUPABASE_URL / SUPABASE_SECRET_KEY   base de comptes Supabase (voir supabase/schema.sql)
- *   SOCKET_PATH_KEY  (obsolète, IGNORÉ : le mod se connecte en dur sur /socket.io)
- *   ENABLE_DASHBOARD par défaut ACTIVÉ (menu du jeu public/index.html servi sur / et /launcher, comme avant) ; "false" pour couper.
+ * Proton Bus Simulator - Serveur Multijoueur avec Clés d'Accès
+ * -----------------------------------------------------------
+ * Express (API REST) + Socket.io (temps réel) — Hugging Face / Docker / Vercel.
  */
 
-try { require('dotenv').config({ path: process.env.DOTENV_CONFIG_PATH || undefined, quiet: true }); } catch (e) { /* dotenv optionnel : sur Hugging Face les Secrets sont déjà des variables d'environnement */ }
+try { require('dotenv').config({ path: process.env.DOTENV_CONFIG_PATH || undefined, quiet: true }); } catch (e) {}
 
 const express = require('express');
 const http = require('http');
@@ -46,32 +28,26 @@ const MIN_TICK_INTERVAL_MS = 1000 / TICK_RATE;
 const DEFAULT_MAX_PLAYERS = 10;
 const JWT_EXPIRES_IN = '7d';
 
+const ADMIN_CODE = process.env.ADMIN_CODE || '2201018280121206';
+
 let JWT_SECRET = process.env.JWT_SECRET;
 if (!JWT_SECRET) {
   JWT_SECRET = crypto.randomBytes(48).toString('hex');
-  console.warn('[SECURITE] ⚠️  JWT_SECRET absent : clé aléatoire générée (les sessions sauteront au prochain redémarrage). Définis JWT_SECRET dans les Secrets du Space.');
+  console.warn('[SECURITE] ⚠️ JWT_SECRET absent : clé aléatoire générée.');
 }
 
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '')
   .split(',').map((s) => s.trim().replace(/\/$/, '')).filter(Boolean);
 const REQUIRE_AUTH = String(process.env.REQUIRE_AUTH || '').toLowerCase() === 'true';
 const API_PROXY_KEY = process.env.API_PROXY_KEY || '';
-// Le mod natif se connecte EN DUR sur /socket.io. Déplacer ce chemin ferait fermer ses WebSocket sans réponse
-// (le proxy Hugging Face renvoie alors "502 Bad Gateway"). SOCKET_PATH_KEY est donc volontairement IGNORÉ.
 const SOCKET_PATH = '/socket.io';
-if (process.env.SOCKET_PATH_KEY) console.warn('[CONFIG] SOCKET_PATH_KEY est ignoré (incompatible avec le mod du jeu). Tu peux le supprimer des Secrets.');
-const ADMIN_KEY = process.env.ADMIN_KEY || '';
-// Comme l'ancien serveur : le menu du jeu (public/index.html) est servi par défaut. ENABLE_DASHBOARD=false pour le couper.
 const ENABLE_DASHBOARD = String(process.env.ENABLE_DASHBOARD || 'true').toLowerCase() !== 'false';
 
 let ICE_SERVERS = [{ urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] }];
 try {
   if (process.env.ICE_SERVERS) ICE_SERVERS = JSON.parse(process.env.ICE_SERVERS);
-} catch (e) {
-  console.error('[VOCAL] ICE_SERVERS invalide (JSON attendu), valeur par défaut utilisée.');
-}
+} catch (e) {}
 
-/** Les clients natifs (mod du jeu) n'envoient pas d'Origin : toujours acceptés. Les navigateurs doivent être dans la liste. */
 function originCheck(origin, cb) {
   if (!origin || ALLOWED_ORIGINS.length === 0 || ALLOWED_ORIGINS.includes(origin.replace(/\/$/, ''))) {
     return cb(null, true);
@@ -86,14 +62,22 @@ function safeEqual(a, b) {
 }
 
 // ------------------------------------------------------------------
-// Données en mémoire : rooms
+// Données en mémoire : rooms & sessions actives
 // ------------------------------------------------------------------
 /** @type {Map<string, any>} */
 const rooms = new Map();
 
+/** Option A : keyCode -> socketId */
+const activeSessions = new Map();
+
 const userKey = (name) => String(name || '').trim().toLowerCase();
 const genId = (prefix = 'id') => `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 9)}`;
 const cleanText = (v, max) => String(v ?? '').replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, max);
+
+function generateAccessKeyString() {
+  const buf = crypto.randomBytes(6).toString('hex').toUpperCase();
+  return `KEY-${buf.slice(0, 4)}-${buf.slice(4, 8)}-${buf.slice(8, 12)}`;
+}
 
 function publicRoom(room) {
   const hostPlayer = room.players.get(room.hostId);
@@ -127,10 +111,10 @@ function cleanBusInfo(bi) {
 }
 
 // ------------------------------------------------------------------
-// Express
+// Express & Socket.io
 // ------------------------------------------------------------------
 const app = express();
-app.set('trust proxy', 1); // Hugging Face / Vercel derrière un reverse-proxy
+app.set('trust proxy', 1);
 app.disable('x-powered-by');
 app.use(helmet({ contentSecurityPolicy: false, crossOriginResourcePolicy: { policy: 'cross-origin' } }));
 app.use(cors({ origin: originCheck }));
@@ -149,169 +133,344 @@ const io = new Server(server, {
   cors: { origin: originCheck, methods: ['GET', 'POST'] },
   pingInterval: 10000,
   pingTimeout: 5000,
-  maxHttpBufferSize: 1e5, // 100 Ko max par message (anti-abus)
+  maxHttpBufferSize: 1e5,
 });
 
-// --- Protection "proxy" : l'API de comptes n'est appelable que depuis ton site (Vercel) -------------
 function isProxyCall(req) {
   return !!API_PROXY_KEY && safeEqual(req.headers['x-proxy-key'], API_PROXY_KEY);
 }
 function requireProxy(req, res, next) {
   if (!API_PROXY_KEY || isProxyCall(req)) return next();
-  return res.status(404).json({ error: 'Not found' }); // on ne confirme même pas que la route existe
+  return res.status(404).json({ error: 'Not found' });
 }
-// Vrai IP du joueur : transmise par le proxy Vercel (seulement si la clé est valide)
 const clientIp = (req) => (isProxyCall(req) && req.headers['x-client-ip']) ? String(req.headers['x-client-ip']).slice(0, 64) : req.ip;
 
-const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  limit: 30,
-  standardHeaders: true,
-  legacyHeaders: false,
-  keyGenerator: clientIp,
-  message: { error: 'Trop de tentatives. Réessaie dans quelques minutes.' },
-});
+// --- Anti brute-force pour l'admin : 4 échecs max -> bannissement 1h par IP ---
+const adminFailures = new Map(); // ip -> { count: number, lockedUntil: number }
 
-// Anti brute-force par compte
-const failed = new Map(); // key -> {n, until}
-function isLocked(key) {
-  const f = failed.get(key);
-  return !!f && f.until > Date.now();
-}
-function registerFailure(key) {
-  const f = failed.get(key) || { n: 0, until: 0 };
-  f.n += 1;
-  if (f.n >= 8) { f.until = Date.now() + 10 * 60 * 1000; f.n = 0; }
-  failed.set(key, f);
-}
-setInterval(() => { const now = Date.now(); for (const [k, f] of failed) if (f.until && f.until < now) failed.delete(k); }, 60 * 1000).unref();
-
-function signToken(user) {
-  return jwt.sign({ id: user.id, username: user.username, pseudo: user.pseudo }, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN });
+function checkAdminIpLock(req, res, next) {
+  const ip = clientIp(req);
+  const fail = adminFailures.get(ip);
+  if (fail && fail.lockedUntil > Date.now()) {
+    const remainingMinutes = Math.ceil((fail.lockedUntil - Date.now()) / 60000);
+    return res.status(429).json({
+      error: `Accès administrateur temporairement bloqué (4 tentatives échouées). Réessaie dans ${remainingMinutes} minute(s).`,
+      locked: true,
+      lockedUntil: fail.lockedUntil,
+    });
+  }
+  next();
 }
 
-function authMiddleware(req, res, next) {
+function registerAdminFailure(ip) {
+  const fail = adminFailures.get(ip) || { count: 0, lockedUntil: 0 };
+  fail.count += 1;
+  if (fail.count >= 4) {
+    fail.lockedUntil = Date.now() + 60 * 60 * 1000; // 1 heure de ban
+  }
+  adminFailures.set(ip, fail);
+  return fail;
+}
+
+function resetAdminFailure(ip) {
+  adminFailures.delete(ip);
+}
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [ip, fail] of adminFailures.entries()) {
+    if (fail.lockedUntil && fail.lockedUntil < now) adminFailures.delete(ip);
+  }
+}, 60 * 1000).unref();
+
+function signPlayerToken(keyData) {
+  return jwt.sign(
+    {
+      id: keyData.id,
+      keyCode: keyData.keyCode,
+      username: keyData.playerName,
+      pseudo: keyData.playerName,
+      role: 'player',
+    },
+    JWT_SECRET,
+    { expiresIn: JWT_EXPIRES_IN }
+  );
+}
+
+function signAdminToken() {
+  return jwt.sign({ role: 'admin' }, JWT_SECRET, { expiresIn: '1d' });
+}
+
+function playerAuthMiddleware(req, res, next) {
   const header = req.headers.authorization || '';
   const token = header.startsWith('Bearer ') ? header.slice(7) : null;
   if (!token) return res.status(401).json({ error: 'Token manquant.' });
   try {
-    req.user = jwt.verify(token, JWT_SECRET);
+    const decoded = jwt.verify(token, JWT_SECRET);
+    req.user = decoded;
     next();
   } catch (err) {
     return res.status(401).json({ error: 'Token invalide ou expiré.' });
   }
 }
 
-const USERNAME_RE = /^[\p{L}\p{N}_.\- ]{3,20}$/u;
+function adminAuthMiddleware(req, res, next) {
+  const header = req.headers.authorization || '';
+  const token = header.startsWith('Bearer ') ? header.slice(7) : null;
+  const adminCodeHeader = req.headers['x-admin-code'];
 
-// Verrouillage global : si API_PROXY_KEY est défini, TOUTE route /api exige la clé (sinon 404 muet).
+  if (adminCodeHeader && safeEqual(adminCodeHeader, ADMIN_CODE)) {
+    req.admin = true;
+    return next();
+  }
+
+  if (token) {
+    try {
+      const decoded = jwt.verify(token, JWT_SECRET);
+      if (decoded && decoded.role === 'admin') {
+        req.admin = true;
+        return next();
+      }
+    } catch (e) {}
+  }
+
+  return res.status(401).json({ error: 'Accès administrateur non autorisé.' });
+}
+
 app.use('/api', requireProxy);
 
 // ------------------------------------------------------------------
-// REST : authentification
+// REST : Authentification Clé Joueur & Administration
 // ------------------------------------------------------------------
-app.post('/api/register', requireProxy, authLimiter, async (req, res) => {
+
+// 1. Authentification Joueur par Clé
+app.post('/api/login-key', requireProxy, async (req, res) => {
   try {
-    const { username, pseudo, password } = req.body || {};
-    const finalUsername = cleanText(username || pseudo, 20);
+    const rawKey = req.body?.key || req.body?.keyCode;
+    const cleanKeyStr = cleanText(rawKey, 60).toUpperCase();
 
-    if (!finalUsername || !password) return res.status(400).json({ error: 'Nom d\'utilisateur et mot de passe requis.' });
-    if (!USERNAME_RE.test(finalUsername)) {
-      return res.status(400).json({ error: 'Nom d\'utilisateur : 3 à 20 caractères (lettres, chiffres, espace, _ . -).' });
-    }
-    if (String(password).length < 6 || String(password).length > 100) {
-      return res.status(400).json({ error: 'Le mot de passe doit contenir entre 6 et 100 caractères.' });
+    if (!cleanKeyStr) {
+      return res.status(400).json({ error: 'Veuillez saisir votre clé d\'accès.' });
     }
 
-    if (await db.findUserByName(finalUsername)) {
-      return res.status(409).json({ error: 'Ce nom d\'utilisateur est déjà utilisé.' });
+    const keyData = await db.findKeyByCode(cleanKeyStr);
+    if (!keyData) {
+      return res.status(401).json({ error: 'Clé d\'accès invalide ou introuvable.' });
     }
 
-    const user = {
-      id: genId('user'),
-      username: finalUsername,
-      pseudo: finalUsername,
-      passwordHash: await bcrypt.hash(String(password), 11),
-      createdAt: Date.now(),
-    };
-    const created = await db.createUser(user);
-    if (!created.ok) return res.status(409).json({ error: 'Ce nom d\'utilisateur est déjà utilisé.' });
-
-    return res.status(201).json({
-      message: 'Compte créé avec succès.',
-      token: signToken(user),
-      user: { id: user.id, username: user.username, pseudo: user.pseudo },
-    });
-  } catch (err) {
-    console.error('[register] erreur:', err);
-    return res.status(500).json({ error: 'Erreur serveur.' });
-  }
-});
-
-app.post('/api/login', requireProxy, authLimiter, async (req, res) => {
-  try {
-    const { username, pseudo, password } = req.body || {};
-    const finalUsername = cleanText(username || pseudo, 40);
-    if (!finalUsername || !password) return res.status(400).json({ error: 'Nom d\'utilisateur et mot de passe requis.' });
-
-    const key = userKey(finalUsername);
-    if (isLocked(key)) return res.status(429).json({ error: 'Compte temporairement verrouillé (trop d\'échecs). Réessaie dans 10 minutes.' });
-
-    const user = await db.findUserByName(finalUsername);
-    // bcrypt.compare même si l'utilisateur n'existe pas -> temps de réponse constant
-    const valid = await bcrypt.compare(String(password), user ? user.passwordHash : '$2a$11$invalidinvalidinvalidinvalidinvalidinvalidinvalidinvalidinv');
-    if (!user || !valid) {
-      registerFailure(key);
-      return res.status(401).json({ error: 'Nom d\'utilisateur ou mot de passe incorrect.' });
+    if (keyData.expiresAt && keyData.expiresAt < Date.now()) {
+      return res.status(401).json({ error: 'Cette clé d\'accès a expiré.' });
     }
-    failed.delete(key);
 
+    // Option A : vérification de session active sur un autre téléphone
+    const activeSocketId = activeSessions.get(keyData.keyCode);
+    if (activeSocketId && io.sockets.sockets.has(activeSocketId)) {
+      return res.status(409).json({
+        error: 'Cette clé est actuellement active sur un autre téléphone/appareil.',
+        code: 'KEY_ALREADY_ACTIVE',
+      });
+    }
+
+    const token = signPlayerToken(keyData);
     return res.json({
       message: 'Connexion réussie.',
-      token: signToken(user),
-      user: { id: user.id, username: user.username, pseudo: user.pseudo },
+      token,
+      user: {
+        id: keyData.id,
+        username: keyData.playerName,
+        pseudo: keyData.playerName,
+        keyCode: keyData.keyCode,
+        expiresAt: keyData.expiresAt,
+      },
     });
   } catch (err) {
-    console.error('[login] erreur:', err);
+    console.error('[login-key] erreur:', err);
     return res.status(500).json({ error: 'Erreur serveur.' });
   }
 });
 
-// Vérifie un token et renvoie le compte (utilisé par le site au chargement)
-app.get('/api/me', requireProxy, authMiddleware, async (req, res) => {
-  const user = await db.findUserByName(req.user.username);
-  if (!user || user.id !== req.user.id) return res.status(401).json({ error: 'Compte introuvable.' });
-  res.json({ user: { id: user.id, username: user.username, pseudo: user.pseudo } });
+// 2. Connexion Administrateur
+app.post('/api/admin/login', requireProxy, checkAdminIpLock, async (req, res) => {
+  try {
+    const { adminCode } = req.body || {};
+    const ip = clientIp(req);
+
+    if (!adminCode || !safeEqual(String(adminCode).trim(), ADMIN_CODE)) {
+      const fail = registerAdminFailure(ip);
+      const remaining = 4 - fail.count;
+      if (fail.count >= 4) {
+        return res.status(429).json({
+          error: 'Code administrateur incorrect. 4 tentatives échouées : accès bloqué pendant 1 heure.',
+          locked: true,
+        });
+      }
+      return res.status(401).json({
+        error: `Code administrateur incorrect (${remaining} tentative(s) restante(s)).`,
+        attemptsRemaining: remaining,
+      });
+    }
+
+    resetAdminFailure(ip);
+    const token = signAdminToken();
+    return res.json({ message: 'Connexion administrateur réussie.', token });
+  } catch (err) {
+    console.error('[admin/login] erreur:', err);
+    return res.status(500).json({ error: 'Erreur serveur.' });
+  }
 });
 
-// ------------------------------------------------------------------
-// REST : infos
-// ------------------------------------------------------------------
-app.get('/api/health', (req, res) => res.json({ ok: true }));
+// 3. Clés Administrateur : Générer une clé
+app.post('/api/admin/keys/generate', requireProxy, adminAuthMiddleware, async (req, res) => {
+  try {
+    const { playerName, duration } = req.body || {};
+    const cleanName = cleanText(playerName, 24);
 
-app.get('/api/rooms', (req, res) => res.json({ rooms: publicRoomList() }));
+    if (!cleanName) {
+      return res.status(400).json({ error: 'Le nom du joueur est obligatoire.' });
+    }
 
-app.get('/api/stats', async (req, res) => {
-  const allowed = ADMIN_KEY ? safeEqual(req.headers['x-admin-key'], ADMIN_KEY) : ENABLE_DASHBOARD;
-  if (!allowed) return res.status(404).json({ error: 'Not found' });
-  const totalPlayers = Array.from(rooms.values()).reduce((sum, r) => sum + r.players.size, 0);
-  res.json({
-    totalUsers: await db.countUsers(),
-    totalRooms: rooms.size,
-    totalPlayersInRooms: totalPlayers,
-    connectedSockets: io.engine.clientsCount,
-    tickRate: TICK_RATE,
-    db: db.getMode(),
-    requireAuth: REQUIRE_AUTH,
+    let durationMs = null;
+    switch (String(duration).toLowerCase()) {
+      case '1h': durationMs = 1 * 3600 * 1000; break;
+      case '24h': durationMs = 24 * 3600 * 1000; break;
+      case '7d': durationMs = 7 * 86400 * 1000; break;
+      case '15d': durationMs = 15 * 86400 * 1000; break;
+      case '30d': durationMs = 30 * 86400 * 1000; break;
+      case 'infinite':
+      case 'infinie':
+      default: durationMs = null; break;
+    }
+
+    const expiresAt = durationMs ? Date.now() + durationMs : null;
+    const keyCode = generateAccessKeyString();
+    const keyId = genId('key');
+
+    const result = await db.createKey({
+      id: keyId,
+      keyCode,
+      playerName: cleanName,
+      expiresAt,
+      createdAt: Date.now(),
+    });
+
+    if (!result.ok) {
+      return res.status(409).json({ error: 'Erreur lors de la génération de la clé (conflit).' });
+    }
+
+    return res.status(201).json({
+      message: 'Clé générée avec succès.',
+      key: result.key,
+    });
+  } catch (err) {
+    console.error('[admin/keys/generate] erreur:', err);
+    return res.status(500).json({ error: 'Erreur serveur.' });
+  }
+});
+
+// 4. Clés Administrateur : Lister les clés
+app.get('/api/admin/keys', requireProxy, adminAuthMiddleware, async (req, res) => {
+  try {
+    const list = await db.getAllKeys();
+    const keysWithStatus = list.map((k) => {
+      const activeSockId = activeSessions.get(k.keyCode);
+      const isActive = Boolean(activeSockId && io.sockets.sockets.has(activeSockId));
+      const isExpired = Boolean(k.expiresAt && k.expiresAt < Date.now());
+      return {
+        ...k,
+        isActive,
+        isExpired,
+      };
+    });
+    return res.json({ keys: keysWithStatus });
+  } catch (err) {
+    console.error('[admin/keys] erreur:', err);
+    return res.status(500).json({ error: 'Erreur serveur.' });
+  }
+});
+
+// 5. Clés Administrateur : Supprimer une clé
+app.delete('/api/admin/keys/:id', requireProxy, adminAuthMiddleware, async (req, res) => {
+  try {
+    const keyId = req.params.id;
+    if (!keyId) return res.status(400).json({ error: 'ID de clé requis.' });
+
+    // Si la clé est en cours d'utilisation, on déconnecte le socket
+    const allKeys = await db.getAllKeys();
+    const targetKey = allKeys.find((k) => k.id === keyId);
+    if (targetKey) {
+      const activeSockId = activeSessions.get(targetKey.keyCode);
+      if (activeSockId) {
+        const sock = io.sockets.sockets.get(activeSockId);
+        if (sock) {
+          sock.emit('kicked', { roomId: '', roomName: '', banned: true, reason: 'Clé supprimée par l\'administrateur.' });
+          sock.disconnect(true);
+        }
+        activeSessions.delete(targetKey.keyCode);
+      }
+    }
+
+    await db.deleteKey(keyId);
+    return res.json({ message: 'Clé supprimée avec succès.' });
+  } catch (err) {
+    console.error('[admin/keys/delete] erreur:', err);
+    return res.status(500).json({ error: 'Erreur serveur.' });
+  }
+});
+
+// 6. Statistiques Administrateur
+app.get('/api/admin/stats', requireProxy, adminAuthMiddleware, async (req, res) => {
+  try {
+    const totalKeys = await db.countKeys();
+    let activeKeysCount = 0;
+    for (const [k, sockId] of activeSessions.entries()) {
+      if (io.sockets.sockets.has(sockId)) activeKeysCount++;
+    }
+    const totalPlayers = Array.from(rooms.values()).reduce((sum, r) => sum + r.players.size, 0);
+
+    return res.json({
+      totalKeys,
+      activeKeysCount,
+      totalRooms: rooms.size,
+      totalPlayersInRooms: totalPlayers,
+      connectedSockets: io.engine.clientsCount,
+      db: db.getMode(),
+    });
+  } catch (err) {
+    console.error('[admin/stats] erreur:', err);
+    return res.status(500).json({ error: 'Erreur serveur.' });
+  }
+});
+
+// 7. Vérification de Session (`/api/me`)
+app.get('/api/me', requireProxy, playerAuthMiddleware, async (req, res) => {
+  if (req.user?.role === 'admin') {
+    return res.json({ user: { username: 'Administrateur', role: 'admin' } });
+  }
+
+  const keyCode = req.user?.keyCode;
+  if (!keyCode) return res.status(401).json({ error: 'Session invalide.' });
+
+  const keyData = await db.findKeyByCode(keyCode);
+  if (!keyData) return res.status(401).json({ error: 'Clé introuvable ou supprimée.' });
+  if (keyData.expiresAt && keyData.expiresAt < Date.now()) {
+    return res.status(401).json({ error: 'Cette clé d\'accès a expiré.' });
+  }
+
+  return res.json({
+    user: {
+      id: keyData.id,
+      username: keyData.playerName,
+      pseudo: keyData.playerName,
+      keyCode: keyData.keyCode,
+      expiresAt: keyData.expiresAt,
+    },
   });
 });
 
-// Launcher Android : l'APK charge ".../launcher". launcher.html s'il existe, sinon le menu index.html (qui contient le pont Android).
-app.get('/launcher', (req, res) => {
-  const f = path.join(__dirname, 'public', 'launcher.html');
-  res.sendFile(fs.existsSync(f) ? f : path.join(__dirname, 'public', 'index.html'));
-});
+app.get('/api/health', (req, res) => res.json({ ok: true }));
+app.get('/api/rooms', (req, res) => res.json({ rooms: publicRoomList() }));
 
+// Express Static Dashboard fallback
 if (ENABLE_DASHBOARD) {
   app.use(express.static(path.join(__dirname, 'public')));
   app.get('*', (req, res, next) => {
@@ -324,15 +483,47 @@ if (ENABLE_DASHBOARD) {
 app.use((req, res) => res.status(404).json({ error: 'Not found' }));
 
 // ------------------------------------------------------------------
-// Socket.io : handshake
+// Socket.io : Handshake & Logic
 // ------------------------------------------------------------------
-io.use((socket, next) => {
+io.use(async (socket, next) => {
   const token = socket.handshake.auth?.token || socket.handshake.query?.token;
   socket.user = null;
-  socket.data.web = socket.handshake.auth?.client === 'web'; // le site Next.js ; le mod natif ne l'est pas
+  socket.data.web = socket.handshake.auth?.client === 'web';
+
   if (token) {
-    try { socket.user = jwt.verify(String(token), JWT_SECRET); } catch (e) { socket.user = null; }
+    try {
+      const decoded = jwt.verify(String(token), JWT_SECRET);
+      if (decoded && decoded.keyCode) {
+        const keyData = await db.findKeyByCode(decoded.keyCode);
+        if (!keyData || (keyData.expiresAt && keyData.expiresAt < Date.now())) {
+          const err = new Error('KEY_EXPIRED');
+          err.data = { code: 'KEY_EXPIRED' };
+          return next(err);
+        }
+
+        // Option A : vérification session unique active
+        const existingSockId = activeSessions.get(keyData.keyCode);
+        if (existingSockId && existingSockId !== socket.id && io.sockets.sockets.has(existingSockId)) {
+          const err = new Error('KEY_ALREADY_ACTIVE');
+          err.data = { code: 'KEY_ALREADY_ACTIVE' };
+          return next(err);
+        }
+
+        socket.user = {
+          id: keyData.id,
+          username: keyData.playerName,
+          pseudo: keyData.playerName,
+          keyCode: keyData.keyCode,
+        };
+        socket.data.keyCode = keyData.keyCode;
+      } else if (decoded && decoded.role === 'admin') {
+        socket.user = { id: 'admin', username: 'Administrateur', role: 'admin' };
+      }
+    } catch (e) {
+      socket.user = null;
+    }
   }
+
   if (REQUIRE_AUTH && !socket.user) {
     const err = new Error('AUTH_REQUIRED');
     err.data = { code: 'AUTH_REQUIRED' };
@@ -341,10 +532,9 @@ io.use((socket, next) => {
   next();
 });
 
-// ------------------------------------------------------------------
-// Fonctions de room (niveau module : utilisables sur n'importe quel socket)
-// ------------------------------------------------------------------
-const getRoomOf = (sock) => (sock.data.roomId ? rooms.get(sock.data.roomId) : null);
+function getRoomOf(sock) {
+  return sock.data.roomId ? rooms.get(sock.data.roomId) : null;
+}
 
 function membersOf(room) {
   return Array.from(room.players.values()).map((p) => ({
@@ -355,12 +545,13 @@ function membersOf(room) {
     muted: !!p.muted,
   }));
 }
-// Les événements "site" (membres, bans, chat, vocal) ne vont QU'AUX clients web (salle socket.io "web:<roomId>").
-// Le mod natif analyse les trames par recherche de texte : il doit recevoir exactement les mêmes trames qu'avant.
+
 const webRoom = (room) => `web:${room.id}`;
+
 function emitMembers(room) {
   io.to(webRoom(room)).emit('roomMembers', { roomId: room.id, hostId: room.hostId, members: membersOf(room) });
 }
+
 function emitBans(room) {
   if (!room.hostId || !io.sockets.sockets.get(room.hostId)?.data.web) return;
   io.to(room.hostId).emit('roomBans', {
@@ -480,14 +671,14 @@ function removeFromRoom(sock) {
   io.emit('roomList', publicRoomList());
 }
 
-// ------------------------------------------------------------------
-// Socket.io : temps réel
-// ------------------------------------------------------------------
+// Socket Connection Events
 io.on('connection', (socket) => {
+  if (socket.data.keyCode) {
+    activeSessions.set(socket.data.keyCode, socket.id);
+  }
   socket.data.roomId = null;
   console.log(`[socket] connecté: ${socket.id} (${socket.user?.username || 'invité'})`);
 
-  // Limiteur d'événements (hors vehicleUpdate déjà throttlé) : 40 / 5 s
   let winStart = Date.now();
   let winCount = 0;
   socket.use(([event], next) => {
@@ -507,20 +698,18 @@ io.on('connection', (socket) => {
     if (typeof callback === 'function') callback({ ok: true, rooms: roomList });
   });
 
-  // -------------------- createRoom --------------------
   socket.on('createRoom', (payload, callback) => {
     const ack = typeof callback === 'function' ? callback : () => {};
     try {
-      // Compte optionnel tant que le mod n'envoie pas de token (activer REQUIRE_AUTH ensuite).
       const { roomName, name, isPrivate, password, mapId, busId, maxPlayers, username: pu, pseudo: pp } = payload || {};
       const username = socket.user?.username || socket.user?.pseudo || pu || pp || `Joueur_${socket.id.slice(0, 5)}`;
 
       const finalRoomName = cleanText(roomName || name, 60);
       const finalMapId = cleanText(mapId || 'map_tana', 80);
       const finalBusId = cleanText(busId || 'bus_default', 80);
-      if (!finalRoomName) return ack({ ok: false, error: 'Le nom du salon (roomName ou name) est requis.' });
+      if (!finalRoomName) return ack({ ok: false, error: 'Le nom du salon est requis.' });
 
-      if (socket.data.roomId) removeFromRoom(socket); // un joueur = une seule room
+      if (socket.data.roomId) removeFromRoom(socket);
 
       const room = {
         id: genId('room'),
@@ -550,7 +739,6 @@ io.on('connection', (socket) => {
     }
   });
 
-  // -------------------- joinRoom --------------------
   socket.on('joinRoom', (payload, callback) => {
     const ack = typeof callback === 'function' ? callback : () => {};
     try {
@@ -567,7 +755,6 @@ io.on('connection', (socket) => {
     }
   });
 
-  // -------------------- startGame --------------------
   socket.on('startGame', (payload, callback) => {
     const ack = typeof callback === 'function' ? callback : () => {};
     try {
@@ -586,13 +773,11 @@ io.on('connection', (socket) => {
     }
   });
 
-  // -------------------- leaveRoom --------------------
   socket.on('leaveRoom', (callback) => {
     removeFromRoom(socket);
     if (typeof callback === 'function') callback({ ok: true });
   });
 
-  // -------------------- Modération (hôte uniquement) --------------------
   function hostTarget(payload, ack) {
     const room = getRoomOf(socket);
     if (!room) { ack({ ok: false, error: 'Vous n\'êtes dans aucune room.' }); return null; }
@@ -604,7 +789,6 @@ io.on('connection', (socket) => {
     return { room, target, targetSock: io.sockets.sockets.get(targetId) };
   }
 
-  // Un joueur peut être connecté deux fois (site + jeu) sous le même pseudo : on les retire ensemble.
   function socketsOfUser(room, target, hostSocketId) {
     const key = userKey(target.username);
     return Array.from(room.players.values())
@@ -630,7 +814,6 @@ io.on('connection', (socket) => {
     if (!t) return;
     const { room, target, targetSock } = t;
     const isGuest = !targetSock?.user;
-    // Un compte est banni par son id ET son pseudo ; un invité par son pseudo seulement.
     room.bans.set(isGuest ? `n:${userKey(target.username)}` : `u:${target.userId}`, target.username);
     if (!isGuest) room.bans.set(`n:${userKey(target.username)}`, target.username);
     for (const sock of socketsOfUser(room, target, socket.id)) {
@@ -669,7 +852,6 @@ io.on('connection', (socket) => {
     ack({ ok: true });
   });
 
-  // -------------------- Chat de room --------------------
   socket.on('roomChat', (payload) => {
     const room = getRoomOf(socket);
     const player = room?.players.get(socket.id);
@@ -685,7 +867,6 @@ io.on('connection', (socket) => {
     });
   });
 
-  // -------------------- Vocal (signalisation WebRTC ; l'audio passe en P2P) --------------------
   socket.on('voice:join', (payload, callback) => {
     const ack = typeof callback === 'function' ? callback : () => {};
     const room = getRoomOf(socket);
@@ -731,7 +912,6 @@ io.on('connection', (socket) => {
     io.to(target.socketId).emit('voice:signal', { from: socket.id, data: payload.data });
   });
 
-  // -------------------- vehicleUpdate (30 Hz max) — INCHANGÉ --------------------
   socket.on('vehicleUpdate', (payload) => {
     const room = getRoomOf(socket);
     if (!room) return;
@@ -790,6 +970,9 @@ io.on('connection', (socket) => {
 
   socket.on('disconnect', (reason) => {
     console.log(`[socket] déconnecté: ${socket.id} (${reason})`);
+    if (socket.data.keyCode && activeSessions.get(socket.data.keyCode) === socket.id) {
+      activeSessions.delete(socket.data.keyCode);
+    }
     removeFromRoom(socket);
   });
 });
@@ -799,9 +982,9 @@ io.on('connection', (socket) => {
 // ------------------------------------------------------------------
 db.init().then((mode) => {
   server.listen(PORT, '0.0.0.0', () => {
-    console.log(`🚌 Proton Bus Multiplayer Server — port ${PORT} — DB: ${mode}`);
-    console.log(`   CORS: ${ALLOWED_ORIGINS.length ? ALLOWED_ORIGINS.join(', ') : '* (aucune restriction — définis ALLOWED_ORIGINS)'}`);
-    console.log(`   REQUIRE_AUTH=${REQUIRE_AUTH}  API_PROXY_KEY=${API_PROXY_KEY ? 'oui' : 'non'}  Dashboard=${ENABLE_DASHBOARD}`);
+    console.log(`🚌 Serveur Proton Bus — port ${PORT} — BDD: ${mode}`);
+    console.log(`   CORS: ${ALLOWED_ORIGINS.length ? ALLOWED_ORIGINS.join(', ') : '*'}`);
+    console.log(`   ADMIN_CODE configuré: ${ADMIN_CODE ? 'OUI' : 'NON'}`);
   });
 });
 

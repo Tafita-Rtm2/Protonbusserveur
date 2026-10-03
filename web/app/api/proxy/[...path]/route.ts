@@ -2,15 +2,18 @@ import { NextRequest, NextResponse } from 'next/server';
 
 export const dynamic = 'force-dynamic';
 
-// Seules ces routes du serveur de jeu sont joignables depuis le site.
-const ALLOWED = new Set(['login', 'register', 'me']);
+function isAllowedRoute(target: string): boolean {
+  if (target === 'login-key' || target === 'me') return true;
+  if (target === 'admin/login' || target === 'admin/keys/generate' || target === 'admin/keys' || target === 'admin/stats') return true;
+  if (target.startsWith('admin/keys/')) return true;
+  return false;
+}
 
 async function handler(req: NextRequest, { params }: { params: { path: string[] } }) {
   const target = (params.path || []).join('/');
-  if (!ALLOWED.has(target)) return NextResponse.json({ error: 'Not found' }, { status: 404 });
+  if (!isAllowedRoute(target)) return NextResponse.json({ error: 'Not found' }, { status: 404 });
 
-  const base = process.env.GAME_SERVER_URL?.replace(/\/$/, '');
-  if (!base) return NextResponse.json({ error: 'Serveur non configuré (GAME_SERVER_URL).' }, { status: 500 });
+  const base = process.env.GAME_SERVER_URL?.replace(/\/$/, '') || 'http://localhost:7860';
 
   const ip = req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() || req.headers.get('x-real-ip') || '';
   const headers: Record<string, string> = {
@@ -25,7 +28,7 @@ async function handler(req: NextRequest, { params }: { params: { path: string[] 
     const upstream = await fetch(`${base}/api/${target}`, {
       method: req.method,
       headers,
-      body: req.method === 'GET' ? undefined : await req.text(),
+      body: (req.method === 'GET' || req.method === 'HEAD' || req.method === 'DELETE') ? undefined : await req.text(),
       cache: 'no-store',
       signal: AbortSignal.timeout(20000),
     });
@@ -36,4 +39,4 @@ async function handler(req: NextRequest, { params }: { params: { path: string[] 
   }
 }
 
-export { handler as GET, handler as POST };
+export { handler as GET, handler as POST, handler as DELETE };
