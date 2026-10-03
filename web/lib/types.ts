@@ -1,4 +1,30 @@
-export type User = { id: string; username: string; pseudo: string };
+export type User = {
+  id?: string;
+  username: string;
+  pseudo: string;
+  keyCode?: string;
+  expiresAt?: number | null;
+  role?: 'player' | 'admin';
+};
+
+export type AccessKey = {
+  id: string;
+  keyCode: string;
+  playerName: string;
+  expiresAt: number | null;
+  createdAt: number;
+  isActive?: boolean;
+  isExpired?: boolean;
+};
+
+export type AdminStats = {
+  totalKeys: number;
+  activeKeysCount: number;
+  totalRooms: number;
+  totalPlayersInRooms: number;
+  connectedSockets: number;
+  db: string;
+};
 
 export type RoomInfo = {
   id: string;

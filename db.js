@@ -1,20 +1,20 @@
 /**
- * Couche base de données des comptes.
- * - SUPABASE_URL + SUPABASE_SECRET_KEY -> Supabase (recommandé) : comptes persistants.
+ * Couche base de données des clés d'accès.
+ * - SUPABASE_URL + SUPABASE_SECRET_KEY -> Supabase (recommandé) : clés persistantes.
  * - DATABASE_URL                        -> PostgreSQL direct (Neon, etc.).
- * - Sinon                               -> repli sur un fichier JSON local (éphémère sur Hugging Face !).
+ * - Sinon                               -> repli sur un fichier JSON local (keys.json).
  */
 const fs = require('fs');
 const path = require('path');
 
-const JSON_FILE = path.join(process.env.DATA_DIR || __dirname, 'users.json');
+const JSON_FILE = path.join(process.env.DATA_DIR || __dirname, 'keys.json');
 
 let pool = null;
 let sb = null;
 let mode = 'json';
-const mem = new Map(); // repli JSON : clé (username en minuscules) -> user
+const mem = new Map(); // repli JSON : key_code -> key object
 
-const keyOf = (name) => String(name || '').trim().toLowerCase();
+const keyOf = (k) => String(k || '').trim();
 
 // ---------------------------------------------------------------- JSON
 function loadJson() {
@@ -22,19 +22,19 @@ function loadJson() {
     if (!fs.existsSync(JSON_FILE)) return;
     const list = JSON.parse(fs.readFileSync(JSON_FILE, 'utf8'));
     if (!Array.isArray(list)) return;
-    for (const u of list) {
-      const k = keyOf(u.username || u.pseudo);
+    for (const item of list) {
+      const k = keyOf(item.keyCode || item.key_code);
       if (!k) continue;
       mem.set(k, {
-        id: u.id,
-        username: u.username || u.pseudo,
-        pseudo: u.pseudo || u.username,
-        passwordHash: u.passwordHash,
-        createdAt: u.createdAt || Date.now(),
+        id: item.id,
+        keyCode: k,
+        playerName: item.playerName || item.player_name,
+        expiresAt: item.expiresAt !== undefined ? item.expiresAt : (item.expires_at !== undefined ? item.expires_at : null),
+        createdAt: item.createdAt || item.created_at || Date.now(),
       });
     }
   } catch (err) {
-    console.error('[DB] Lecture users.json impossible:', err.message);
+    console.error('[DB] Lecture keys.json impossible:', err.message);
   }
 }
 
@@ -42,25 +42,25 @@ function saveJson() {
   try {
     fs.writeFileSync(JSON_FILE, JSON.stringify([...mem.values()], null, 2), 'utf8');
   } catch (err) {
-    console.error('[DB] Écriture users.json impossible:', err.message);
+    console.error('[DB] Écriture keys.json impossible:', err.message);
   }
 }
 
 // ------------------------------------------------------------ PostgreSQL
 const SCHEMA = `
-CREATE TABLE IF NOT EXISTS users (
-  id            TEXT PRIMARY KEY,
-  username      TEXT NOT NULL,
-  username_key  TEXT NOT NULL UNIQUE,
-  password_hash TEXT NOT NULL,
-  created_at    BIGINT NOT NULL
+CREATE TABLE IF NOT EXISTS keys (
+  id           TEXT PRIMARY KEY,
+  key_code     TEXT NOT NULL UNIQUE,
+  player_name  TEXT NOT NULL,
+  expires_at   BIGINT,
+  created_at   BIGINT NOT NULL
 );`;
 
-const rowToUser = (r) => ({
+const rowToKey = (r) => ({
   id: r.id,
-  username: r.username,
-  pseudo: r.username,
-  passwordHash: r.password_hash,
+  keyCode: r.key_code,
+  playerName: r.player_name,
+  expiresAt: r.expires_at ? Number(r.expires_at) : null,
   createdAt: Number(r.created_at),
 });
 
@@ -76,19 +76,17 @@ async function initPostgres() {
   pool.on('error', (e) => console.error('[DB] pool error:', e.message));
   await pool.query(SCHEMA);
 
-  // Import unique des anciens comptes users.json si la table est vide
-  const { rows } = await pool.query('SELECT COUNT(*)::int AS n FROM users');
+  const { rows } = await pool.query('SELECT COUNT(*)::int AS n FROM keys');
   if (rows[0].n === 0) {
     loadJson();
-    for (const u of mem.values()) {
+    for (const item of mem.values()) {
       await pool.query(
-        `INSERT INTO users (id, username, username_key, password_hash, created_at)
+        `INSERT INTO keys (id, key_code, player_name, expires_at, created_at)
          VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING`,
-        [u.id, u.username, keyOf(u.username), u.passwordHash, u.createdAt]
+        [item.id, item.keyCode, item.playerName, item.expiresAt, item.createdAt]
       );
     }
-    if (mem.size) console.log(`[DB] ${mem.size} ancien(s) compte(s) importé(s) dans PostgreSQL.`);
-    mem.clear();
+    if (mem.size) console.log(`[DB] ${mem.size} ancienne(s) clé(s) importée(s) dans PostgreSQL.`);
   }
 }
 
@@ -98,23 +96,25 @@ async function initSupabase() {
   sb = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SECRET_KEY, {
     auth: { persistSession: false, autoRefreshToken: false },
   });
-  const { count, error } = await sb.from('users').select('id', { count: 'exact', head: true });
+  const { count, error } = await sb.from('keys').select('id', { count: 'exact', head: true });
   if (error) {
     const missing = error.code === 'PGRST205' || /does not exist|schema cache/i.test(error.message || '');
     throw new Error(missing
-      ? 'table "users" absente : exécute supabase/schema.sql dans Supabase → SQL Editor'
+      ? 'table "keys" absente : exécute supabase/schema.sql dans Supabase → SQL Editor'
       : (error.message || error.code || 'erreur inconnue'));
   }
-  // Import unique des anciens comptes users.json si la table est vide
   if (count === 0) {
     loadJson();
-    for (const u of mem.values()) {
-      await sb.from('users').insert({
-        id: u.id, username: u.username, username_key: keyOf(u.username), password_hash: u.passwordHash, created_at: u.createdAt,
+    for (const item of mem.values()) {
+      await sb.from('keys').insert({
+        id: item.id,
+        key_code: item.keyCode,
+        player_name: item.playerName,
+        expires_at: item.expiresAt,
+        created_at: item.createdAt,
       });
     }
-    if (mem.size) console.log(`[DB] ${mem.size} ancien(s) compte(s) importé(s) dans Supabase.`);
-    mem.clear();
+    if (mem.size) console.log(`[DB] ${mem.size} ancienne(s) clé(s) importée(s) dans Supabase.`);
   }
 }
 
@@ -124,10 +124,10 @@ async function init() {
     try {
       await initSupabase();
       mode = 'supabase';
-      console.log('[DB] Supabase connecté ✔');
+      console.log('[DB] Supabase connecté ✔ (Clés persistantes)');
       return mode;
     } catch (err) {
-      console.error('[DB] ⚠️  Supabase inaccessible, repli (comptes NON persistants):', err.message);
+      console.error('[DB] ⚠️ Supabase inaccessible, repli sur JSON:', err.message);
       sb = null;
     }
   }
@@ -135,74 +135,126 @@ async function init() {
     try {
       await initPostgres();
       mode = 'postgres';
-      console.log('[DB] PostgreSQL connecté ✔');
+      console.log('[DB] PostgreSQL connecté ✔ (Clés persistantes)');
       return mode;
     } catch (err) {
-      console.error('[DB] ⚠️  PostgreSQL inaccessible, repli sur JSON (comptes NON persistants):', err.message);
+      console.error('[DB] ⚠️ PostgreSQL inaccessible, repli sur JSON:', err.message);
       pool = null;
     }
   } else if (!process.env.SUPABASE_URL) {
-    console.warn('[DB] ⚠️  Aucune base configurée : comptes stockés en JSON éphémère.');
+    console.warn('[DB] ⚠️ Aucune BDD configurée : clés stockées en JSON.');
   }
   loadJson();
   mode = 'json';
   return mode;
 }
 
-async function findUserByName(name) {
-  const k = keyOf(name);
+async function findKeyByCode(keyCode) {
+  const k = keyOf(keyCode);
   if (!k) return null;
   if (mode === 'supabase') {
-    const { data, error } = await sb.from('users').select('*').eq('username_key', k).maybeSingle();
+    const { data, error } = await sb.from('keys').select('*').eq('key_code', k).maybeSingle();
     if (error) throw new Error(error.message);
-    return data ? rowToUser(data) : null;
+    return data ? rowToKey(data) : null;
   }
   if (mode === 'postgres') {
-    const { rows } = await pool.query('SELECT * FROM users WHERE username_key = $1', [k]);
-    return rows[0] ? rowToUser(rows[0]) : null;
+    const { rows } = await pool.query('SELECT * FROM keys WHERE key_code = $1', [k]);
+    return rows[0] ? rowToKey(rows[0]) : null;
   }
   return mem.get(k) || null;
 }
 
-/** @returns {Promise<{ok:true}|{ok:false, conflict:true}>} */
-async function createUser(user) {
-  const k = keyOf(user.username);
+async function createKey(item) {
+  const k = keyOf(item.keyCode);
+  const keyObj = {
+    id: item.id,
+    keyCode: k,
+    playerName: item.playerName,
+    expiresAt: item.expiresAt ?? null,
+    createdAt: item.createdAt || Date.now(),
+  };
+
   if (mode === 'supabase') {
-    const { error } = await sb.from('users').insert({
-      id: user.id, username: user.username, username_key: k, password_hash: user.passwordHash, created_at: user.createdAt,
+    const { error } = await sb.from('keys').insert({
+      id: keyObj.id,
+      key_code: keyObj.keyCode,
+      player_name: keyObj.playerName,
+      expires_at: keyObj.expiresAt,
+      created_at: keyObj.createdAt,
     });
-    if (!error) return { ok: true };
+    if (!error) return { ok: true, key: keyObj };
     if (error.code === '23505') return { ok: false, conflict: true };
     throw new Error(error.message);
   }
   if (mode === 'postgres') {
     try {
       await pool.query(
-        'INSERT INTO users (id, username, username_key, password_hash, created_at) VALUES ($1,$2,$3,$4,$5)',
-        [user.id, user.username, k, user.passwordHash, user.createdAt]
+        'INSERT INTO keys (id, key_code, player_name, expires_at, created_at) VALUES ($1,$2,$3,$4,$5)',
+        [keyObj.id, keyObj.keyCode, keyObj.playerName, keyObj.expiresAt, keyObj.createdAt]
       );
-      return { ok: true };
+      return { ok: true, key: keyObj };
     } catch (err) {
       if (err.code === '23505') return { ok: false, conflict: true };
       throw err;
     }
   }
   if (mem.has(k)) return { ok: false, conflict: true };
-  mem.set(k, user);
+  mem.set(k, keyObj);
   saveJson();
+  return { ok: true, key: keyObj };
+}
+
+async function deleteKey(id) {
+  if (mode === 'supabase') {
+    const { error } = await sb.from('keys').delete().eq('id', id);
+    if (error) throw new Error(error.message);
+    return { ok: true };
+  }
+  if (mode === 'postgres') {
+    await pool.query('DELETE FROM keys WHERE id = $1', [id]);
+    return { ok: true };
+  }
+  for (const [k, v] of mem.entries()) {
+    if (v.id === id) {
+      mem.delete(k);
+      saveJson();
+      break;
+    }
+  }
   return { ok: true };
 }
 
-async function countUsers() {
+async function getAllKeys() {
   if (mode === 'supabase') {
-    const { count } = await sb.from('users').select('id', { count: 'exact', head: true });
+    const { data, error } = await sb.from('keys').select('*').order('created_at', { ascending: false });
+    if (error) throw new Error(error.message);
+    return (data || []).map(rowToKey);
+  }
+  if (mode === 'postgres') {
+    const { rows } = await pool.query('SELECT * FROM keys ORDER BY created_at DESC');
+    return rows.map(rowToKey);
+  }
+  return [...mem.values()].sort((a, b) => b.createdAt - a.createdAt);
+}
+
+async function countKeys() {
+  if (mode === 'supabase') {
+    const { count } = await sb.from('keys').select('id', { count: 'exact', head: true });
     return count || 0;
   }
   if (mode === 'postgres') {
-    const { rows } = await pool.query('SELECT COUNT(*)::int AS n FROM users');
+    const { rows } = await pool.query('SELECT COUNT(*)::int AS n FROM keys');
     return rows[0].n;
   }
   return mem.size;
 }
 
-module.exports = { init, findUserByName, createUser, countUsers, getMode: () => mode };
+module.exports = {
+  init,
+  findKeyByCode,
+  createKey,
+  deleteKey,
+  getAllKeys,
+  countKeys,
+  getMode: () => mode,
+};

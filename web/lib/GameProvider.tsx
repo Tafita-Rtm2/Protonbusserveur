@@ -5,7 +5,7 @@ import { api } from './api';
 import { android } from './android';
 import type { Ack, BanEntry, ChatMsg, Member, RoomInfo, User } from './types';
 
-const TOKEN_KEY = 'pbs_token';
+const TOKEN_KEY = 'pbs_key_token';
 
 export type Toast = { id: number; kind: 'info' | 'error' | 'success'; text: string };
 export type CreateOpts = { name: string; maxPlayers: number; mapId: string; busId: string; password?: string };
@@ -13,6 +13,7 @@ export type CreateOpts = { name: string; maxPlayers: number; mapId: string; busI
 type Ctx = {
   booting: boolean;
   user: User | null;
+  token: string | null;
   connected: boolean;
   socket: Socket | null;
   rooms: RoomInfo[];
@@ -23,8 +24,8 @@ type Ctx = {
   chat: ChatMsg[];
   isHost: boolean;
   toasts: Toast[];
-  login: (u: string, p: string) => Promise<string | null>;
-  register: (u: string, p: string) => Promise<string | null>;
+  loginWithKey: (key: string) => Promise<{ error?: string; code?: string }>;
+  loginAdmin: (code: string) => Promise<{ error?: string; locked?: boolean; remainingMs?: number; attemptsRemaining?: number }>;
   logout: () => void;
   refreshRooms: () => void;
   createRoom: (o: CreateOpts) => Promise<string | null>;
@@ -36,6 +37,7 @@ type Ctx = {
   closeRoom: () => void;
   sendChat: (text: string) => void;
   dismissToast: (id: number) => void;
+  toast: (kind: Toast['kind'], text: string) => void;
 };
 
 const GameCtx = createContext<Ctx | null>(null);
@@ -45,7 +47,6 @@ export const useGame = () => {
   return c;
 };
 
-/** Un joueur connecté à la fois depuis le site et depuis le jeu n'apparaît qu'une fois. */
 function dedupe(list: Member[], mySocketId?: string): Member[] {
   const groups = new Map<string, Member[]>();
   for (const m of list) {
@@ -93,6 +94,13 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
     setRoomId(null); setRoomInfo(null); setHostId(null); setMembers([]); setBans([]); setChat([]);
   }, []);
 
+  const logout = useCallback(() => {
+    localStorage.removeItem(TOKEN_KEY);
+    setToken(null); setUser(null);
+  }, []);
+  const logoutRef = useRef(logout);
+  useEffect(() => { logoutRef.current = logout; }, [logout]);
+
   // --- Session au chargement -------------------------------------------------
   useEffect(() => {
     (async () => {
@@ -109,12 +117,9 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
   // --- Connexion Socket.io -----------------------------------------------------
   useEffect(() => {
     if (!token || !user) return;
-    let cancelled = false;
     let s: Socket | null = null;
 
     (async () => {
-      // Même origine que le site : Vercel relaie /socket.io vers le serveur (URL Hugging Face jamais exposée).
-      // Vercel ne supporte pas les WebSockets => long-polling uniquement.
       s = io({ path: '/socket.io', auth: { token, client: 'web' }, transports: ['polling'], reconnectionDelayMax: 5000 });
       setSocket(s);
 
@@ -124,7 +129,16 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
       });
       s.on('disconnect', () => setConnected(false));
       s.on('connect_error', (e) => {
-        if (e.message === 'AUTH_REQUIRED') { toast('error', 'Session expirée, reconnecte-toi.'); logoutRef.current(); }
+        if (e.message === 'KEY_ALREADY_ACTIVE' || (e as any)?.data?.code === 'KEY_ALREADY_ACTIVE') {
+          toast('error', 'Cette clé est active sur un autre téléphone. Déconnexion.');
+          logoutRef.current();
+        } else if (e.message === 'KEY_EXPIRED' || (e as any)?.data?.code === 'KEY_EXPIRED') {
+          toast('error', 'Cette clé a expiré. Déconnexion.');
+          logoutRef.current();
+        } else if (e.message === 'AUTH_REQUIRED') {
+          toast('error', 'Session expirée, reconnecte-toi.');
+          logoutRef.current();
+        }
       });
 
       s.on('roomList', (list: RoomInfo[]) => {
@@ -147,9 +161,9 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
         setRoomInfo(d.room);
         toast('info', `${d.newHostUsername} est maintenant le créateur de la room.`);
       });
-      s.on('kicked', (d: { roomName: string; banned: boolean }) => {
+      s.on('kicked', (d: { roomName: string; banned: boolean; reason?: string }) => {
         resetRoom();
-        toast('error', d.banned ? `Tu as été banni de « ${d.roomName} ».` : `Tu as été expulsé de « ${d.roomName} ».`);
+        toast('error', d.reason || (d.banned ? `Tu as été banni de « ${d.roomName} ».` : `Tu as été expulsé de « ${d.roomName} ».`));
       });
       s.on('roomClosed', (d: { roomName: string; by: string }) => {
         resetRoom();
@@ -158,7 +172,6 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
     })();
 
     return () => {
-      cancelled = true;
       s?.removeAllListeners();
       s?.disconnect();
       setSocket(null); setConnected(false); setRooms([]); resetRoom();
@@ -166,23 +179,32 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
   }, [token, user, toast, resetRoom]);
 
   // --- Actions -----------------------------------------------------------------
-  const finishAuth = useCallback((res: { token?: string; user?: User; error?: string }) => {
-    if (res.error || !res.token || !res.user) return res.error || 'Erreur inconnue.';
+  const loginWithKey = useCallback(async (keyStr: string) => {
+    const res = await api.loginKey(keyStr);
+    if (res.error || !res.token || !res.user) {
+      return { error: res.error || 'Erreur lors de la validation de la clé.', code: (res as any).code };
+    }
     localStorage.setItem(TOKEN_KEY, res.token);
     setToken(res.token);
     setUser(res.user);
-    return null;
+    return {};
   }, []);
 
-  const login = useCallback(async (u: string, p: string) => finishAuth(await api.login(u, p)), [finishAuth]);
-  const register = useCallback(async (u: string, p: string) => finishAuth(await api.register(u, p)), [finishAuth]);
-
-  const logout = useCallback(() => {
-    localStorage.removeItem(TOKEN_KEY);
-    setToken(null); setUser(null);
+  const loginAdmin = useCallback(async (code: string) => {
+    const res = await api.adminLogin(code);
+    if (res.error || !res.token) {
+      return {
+        error: res.error || 'Code administrateur incorrect.',
+        locked: res.locked,
+        remainingMs: res.remainingMs,
+        attemptsRemaining: res.attemptsRemaining,
+      };
+    }
+    localStorage.setItem(TOKEN_KEY, res.token);
+    setToken(res.token);
+    setUser({ username: 'Administrateur', pseudo: 'Administrateur', role: 'admin' });
+    return {};
   }, []);
-  const logoutRef = useRef(logout);
-  useEffect(() => { logoutRef.current = logout; }, [logout]);
 
   const refreshRooms = useCallback(() => { socket?.emit('getRooms', () => {}); }, [socket]);
 
@@ -200,8 +222,6 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
     if (!r.ok || !r.room) return r.error || 'Erreur.';
     setChat([]);
     setRoomId(r.room.id); setRoomInfo(r.room); setHostId(r.room.hostId);
-    // Comme l'ancien menu : dès qu'on entre dans un salon, on donne pseudo/roomId/mapId/busId au jeu (AndroidHost.launchGame)
-    // pour que le mod rejoigne le salon et affiche les voitures. Sans cet appel le mod reste connecté mais "sans salon".
     const u = userRef.current;
     if (u && android.launch({ pseudo: u.username, roomId: r.room.id, mapId: r.room.mapId, busId: r.room.busId })) {
       toast('success', '🎮 Jeu synchronisé avec la room.');
@@ -230,11 +250,11 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
   const sendChat = useCallback((text: string) => { socket?.emit('roomChat', { text }); }, [socket]);
 
   const value = useMemo<Ctx>(() => ({
-    booting, user, connected, socket, rooms, room: roomInfo, roomId, members, bans, chat,
+    booting, user, token, connected, socket, rooms, room: roomInfo, roomId, members, bans, chat,
     isHost: !!socket?.id && hostId === socket.id, toasts,
-    login, register, logout, refreshRooms, createRoom, joinRoom, leaveRoom, kick, ban, unban, closeRoom, sendChat, dismissToast,
-  }), [booting, user, connected, socket, rooms, roomInfo, roomId, members, bans, chat, hostId, toasts,
-    login, register, logout, refreshRooms, createRoom, joinRoom, leaveRoom, kick, ban, unban, closeRoom, sendChat, dismissToast]);
+    loginWithKey, loginAdmin, logout, refreshRooms, createRoom, joinRoom, leaveRoom, kick, ban, unban, closeRoom, sendChat, dismissToast, toast,
+  }), [booting, user, token, connected, socket, rooms, roomInfo, roomId, members, bans, chat, hostId, toasts,
+    loginWithKey, loginAdmin, logout, refreshRooms, createRoom, joinRoom, leaveRoom, kick, ban, unban, closeRoom, sendChat, dismissToast, toast]);
 
   return <GameCtx.Provider value={value}>{children}</GameCtx.Provider>;
 }

@@ -16,7 +16,7 @@ function App() {
       </div>
     );
   }
-  if (!user) return <AuthScreen />;
+  if (!user || user.role === 'admin') return <AuthScreen />;
   return roomId ? <RoomView /> : <Lobby />;
 }
 
