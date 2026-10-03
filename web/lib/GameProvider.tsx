@@ -210,8 +210,14 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
     if (!r.ok || !r.room) return r.error || 'Erreur.';
     setChat([]); setGameStarted(false);
     setRoomId(r.room.id); setRoomInfo(r.room); setHostId(r.room.hostId);
+    // Comme l'ancien menu : dès qu'on entre dans un salon, on donne pseudo/roomId/mapId/busId au jeu (AndroidHost.launchGame)
+    // pour que le mod rejoigne le salon et affiche les voitures. Sans cet appel le mod reste connecté mais "sans salon".
+    const u = userRef.current;
+    if (u && android.launch({ pseudo: u.username, roomId: r.room.id, mapId: r.room.mapId, busId: r.room.busId })) {
+      toast('success', '🎮 Jeu synchronisé avec la room.');
+    }
     return null;
-  }, []);
+  }, [toast]);
 
   const createRoom = useCallback(async (o: CreateOpts) => {
     const r = await emitAck('createRoom', {
