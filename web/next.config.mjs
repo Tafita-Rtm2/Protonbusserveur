@@ -2,7 +2,6 @@
 
 // Ces valeurs sont lues AU BUILD sur Vercel (Environment Variables). Elles ne sont jamais envoyées au navigateur.
 const GAME = (process.env.GAME_SERVER_URL || '').replace(/\/$/, '');
-const KEY = (process.env.SOCKET_PATH_KEY || '').replace(/[^A-Za-z0-9_-]/g, '');
 
 const nextConfig = {
   reactStrictMode: true,
@@ -12,8 +11,8 @@ const nextConfig = {
     const rules = [{ source: '/launcher', destination: '/' }]; // l'APK charge <url>/launcher
     if (GAME) {
       // Le navigateur ET le jeu parlent à https://ton-site.vercel.app/socket.io ;
-      // Vercel relaie vers Hugging Face en insérant le chemin secret. L'URL HF n'apparaît nulle part côté client.
-      const dest = `${GAME}${KEY ? `/${KEY}` : ''}/socket.io`;
+      // Vercel relaie vers Hugging Face. L'URL HF n'apparaît nulle part côté client.
+      const dest = `${GAME}/socket.io`;
       rules.push({ source: '/socket.io', destination: `${dest}/` });
       rules.push({ source: '/socket.io/:path*', destination: `${dest}/:path*` });
     } else {

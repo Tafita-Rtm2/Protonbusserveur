@@ -19,9 +19,9 @@ Vocal : WebRTC pair-à-pair entre joueurs
 Copie les lignes de `hf-space.env` dans *Settings → Variables and secrets* :
 `SUPABASE_URL`, `SUPABASE_SECRET_KEY`, `JWT_SECRET`, `API_PROXY_KEY`, `ALLOWED_ORIGINS`.
 
-> ⚠️ **N'ajoute PAS `SOCKET_PATH_KEY`.** Le mod du jeu (`libmod.so`) a l'adresse `tafitaniaina-tvserveur.hf.space`
-> et le chemin `/socket.io` **codés en dur** (WebSocket brut, sans token). Un chemin secret couperait la connexion du mod :
-> plus de voitures. Si tu l'as déjà ajouté, **supprime-le** du Space.
+> ℹ️ **`SOCKET_PATH_KEY` est désormais ignoré par le serveur** (inutile de l'ajouter ; s'il est déjà dans les Secrets il ne gêne plus). Le mod du jeu (`libmod.so`) a l'adresse `tafitaniaina-tvserveur.hf.space`
+> et le chemin `/socket.io` **codés en dur** (WebSocket brut, sans token). Déplacer ce chemin faisait fermer les WebSocket du mod sans réponse,
+> ce que le proxy Hugging Face affiche en `502 Bad Gateway` (logs « Upgrade WebSocket refusé… 502 »).
 > Laisse aussi `REQUIRE_AUTH` absent (le mod n'envoie pas de compte).
 
 ## 3. Site — Vercel

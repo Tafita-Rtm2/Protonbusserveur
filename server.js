@@ -18,7 +18,7 @@
  *   ENABLE_DASHBOARD "true" => sert le dashboard de test public/ (désactivé par défaut)
  *   ICE_SERVERS      JSON de serveurs STUN/TURN pour le vocal (optionnel)
  *   SUPABASE_URL / SUPABASE_SECRET_KEY   base de comptes Supabase (voir supabase/schema.sql)
- *   SOCKET_PATH_KEY  ⚠️ NE PAS UTILISER avec le mod natif actuel (il se connecte en dur sur /socket.io).
+ *   SOCKET_PATH_KEY  (obsolète, IGNORÉ : le mod se connecte en dur sur /socket.io)
  *   ENABLE_DASHBOARD par défaut ACTIVÉ (menu du jeu public/index.html servi sur / et /launcher, comme avant) ; "false" pour couper.
  */
 
@@ -56,8 +56,10 @@ const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '')
   .split(',').map((s) => s.trim().replace(/\/$/, '')).filter(Boolean);
 const REQUIRE_AUTH = String(process.env.REQUIRE_AUTH || '').toLowerCase() === 'true';
 const API_PROXY_KEY = process.env.API_PROXY_KEY || '';
-const SOCKET_PATH_KEY = (process.env.SOCKET_PATH_KEY || '').replace(/[^A-Za-z0-9_-]/g, '');
-const SOCKET_PATH = SOCKET_PATH_KEY ? `/${SOCKET_PATH_KEY}/socket.io` : '/socket.io';
+// Le mod natif se connecte EN DUR sur /socket.io. Déplacer ce chemin ferait fermer ses WebSocket sans réponse
+// (le proxy Hugging Face renvoie alors "502 Bad Gateway"). SOCKET_PATH_KEY est donc volontairement IGNORÉ.
+const SOCKET_PATH = '/socket.io';
+if (process.env.SOCKET_PATH_KEY) console.warn('[CONFIG] SOCKET_PATH_KEY est ignoré (incompatible avec le mod du jeu). Tu peux le supprimer des Secrets.');
 const ADMIN_KEY = process.env.ADMIN_KEY || '';
 // Comme l'ancien serveur : le menu du jeu (public/index.html) est servi par défaut. ENABLE_DASHBOARD=false pour le couper.
 const ENABLE_DASHBOARD = String(process.env.ENABLE_DASHBOARD || 'true').toLowerCase() !== 'false';
@@ -799,7 +801,6 @@ db.init().then((mode) => {
   server.listen(PORT, '0.0.0.0', () => {
     console.log(`🚌 Proton Bus Multiplayer Server — port ${PORT} — DB: ${mode}`);
     console.log(`   CORS: ${ALLOWED_ORIGINS.length ? ALLOWED_ORIGINS.join(', ') : '* (aucune restriction — définis ALLOWED_ORIGINS)'}`);
-    console.log(`   Socket.io path: ${SOCKET_PATH_KEY ? '/<clé secrète>/socket.io (verrouillé)' : '/socket.io (public)'}`);
     console.log(`   REQUIRE_AUTH=${REQUIRE_AUTH}  API_PROXY_KEY=${API_PROXY_KEY ? 'oui' : 'non'}  Dashboard=${ENABLE_DASHBOARD}`);
   });
 });

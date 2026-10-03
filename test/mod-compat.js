@@ -12,7 +12,7 @@ const open = (log) => new Promise((res) => {
 setTimeout(() => { console.log('TIMEOUT'); process.exit(2); }, 30000).unref();
 (async () => {
   require('fs').rmSync('/tmp/users.json', { force: true });
-  const srv = spawn('node', ['server.js'], { env: { DOTENV_CONFIG_PATH: '/nonexistent', PATH: process.env.PATH, PORT, DATA_DIR: '/tmp' }, stdio: 'ignore', cwd: __dirname + '/..' });
+  const srv = spawn('node', ['server.js'], { env: { DOTENV_CONFIG_PATH: '/nonexistent', SOCKET_PATH_KEY: 'laisse-sur-le-space', API_PROXY_KEY: 'k', PATH: process.env.PATH, PORT, DATA_DIR: '/tmp' }, stdio: 'ignore', cwd: __dirname + '/..' });
   await wait(1500);
 
   console.log('Pages du jeu (comme l\'ancien serveur)');
@@ -20,7 +20,7 @@ setTimeout(() => { console.log('TIMEOUT'); process.exit(2); }, 30000).unref();
   ok(root.status === 200 && html.includes('AndroidHost'), '/ sert le menu du jeu (pont Android)');
   const lau = await fetch(`http://127.0.0.1:${PORT}/launcher`);
   ok(lau.status === 200 && (await lau.text()).includes('AndroidHost'), '/launcher sert le menu (au lieu d\'un 404)');
-  ok((await fetch(`http://127.0.0.1:${PORT}/api/rooms`)).status === 200, '/api/rooms public comme avant');
+  ok((await fetch(`http://127.0.0.1:${PORT}/api/rooms`)).status === 404, '/api/rooms caché sans clé (API_PROXY_KEY) — le mod n\'utilise pas le REST');
 
   console.log('Trames reçues par le mod');
   const logA = [], logB = [];
