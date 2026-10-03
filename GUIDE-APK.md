@@ -5,7 +5,7 @@ workflows GitHub Actions du repo `protonbusgg` sont verts. Il ne modifie
 JAMAIS `libmain.so` d'origine — tout passe par l'installeur officiel
 LemonLoader (documenté, versionné), pas par un patch ELF manuel.
 
-⚠️ **Un point n'est pas encore garanti à 100%** et doit être confirmé par
+⚠️ **Un point n'est pas encore garanti à 100%** et doit être confirmé pa
 Jules avant de considérer le code "fini" — voir l'encadré en bas de la
 Section 3. Ne saute pas cette vérification.
 
