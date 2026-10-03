@@ -28,7 +28,7 @@ const MIN_TICK_INTERVAL_MS = 1000 / TICK_RATE;
 const DEFAULT_MAX_PLAYERS = 10;
 const JWT_EXPIRES_IN = '7d';
 
-const ADMIN_CODE = process.env.ADMIN_CODE || '2201018280121206';
+const ADMIN_CODE = process.env.ADMIN_CODE;
 
 let JWT_SECRET = process.env.JWT_SECRET;
 if (!JWT_SECRET) {
