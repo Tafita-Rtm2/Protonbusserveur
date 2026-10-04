@@ -628,7 +628,23 @@ if (ENABLE_DASHBOARD) {
   app.use(express.static(path.join(__dirname, 'public')));
   app.get('*', (req, res, next) => {
     if (req.path.startsWith('/api/')) return next();
-    res.sendFile(path.join(__dirname, 'public', 'index.html'));
+    const indexPath = path.join(__dirname, 'public', 'index.html');
+    // IMPORTANT : res.sendFile() sans gestion d'erreur fait planter TOUT le
+    // process Node si le fichier est absent (ENOENT non rattrapé), ce qui
+    // provoquait un redémarrage en boucle du serveur (toutes les connexions
+    // coupées en même temps, rafale de "ping timeout"). On vérifie d'abord
+    // que le fichier existe, et on répond proprement sinon — ne jamais
+    // laisser une page web cassée faire tomber tout le multijoueur.
+    if (!fs.existsSync(indexPath)) {
+      console.error(`[Dashboard] Fichier introuvable: ${indexPath} — vérifie le déploiement (dossier public/ manquant ?).`);
+      return res.status(200).type('text/plain').send('Proton Bus server — online (dashboard indisponible)');
+    }
+    res.sendFile(indexPath, (err) => {
+      if (err) {
+        console.error('[Dashboard] Erreur sendFile:', err.message);
+        if (!res.headersSent) res.status(200).type('text/plain').send('Proton Bus server — online');
+      }
+    });
   });
 } else {
   app.get('/', (req, res) => res.type('text/plain').send('Proton Bus server — online'));
