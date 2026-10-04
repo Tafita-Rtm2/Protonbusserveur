@@ -40,9 +40,13 @@ function loadJson() {
 
 function saveJson() {
   try {
+    const dir = path.dirname(JSON_FILE);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(JSON_FILE, JSON.stringify([...mem.values()], null, 2), 'utf8');
   } catch (err) {
-    console.error('[DB] Écriture keys.json impossible:', err.message);
+    if (mode === 'json') {
+      console.error('[DB] Écriture keys.json impossible:', err.message);
+    }
   }
 }
 
@@ -101,7 +105,8 @@ async function initPostgres() {
 // -------------------------------------------------------------- Supabase
 async function initSupabase() {
   const { createClient } = require('@supabase/supabase-js');
-  sb = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SECRET_KEY, {
+  const sbKey = process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY;
+  sb = createClient(process.env.SUPABASE_URL, sbKey, {
     auth: { persistSession: false, autoRefreshToken: false },
   });
 
@@ -137,7 +142,8 @@ async function initSupabase() {
 
 // ------------------------------------------------------------------ API
 async function init() {
-  if (process.env.SUPABASE_URL && process.env.SUPABASE_SECRET_KEY) {
+  const sbKey = process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY;
+  if (process.env.SUPABASE_URL && sbKey) {
     try {
       await initSupabase();
       mode = 'supabase';
