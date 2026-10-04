@@ -5,7 +5,7 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "test": "node test/smoke.js && node test/lock.js && node test/db-supabase.js && node test/mod-compat.js && node test/hmac-secu.js"
+    "test": "node test/smoke.js && node test/lock.js && node test/db-supabase.js && node test/mod-compat.js && node test/hmac-secu.js && node test/features.js"
   },
   "license": "MIT",
   "dependencies": {

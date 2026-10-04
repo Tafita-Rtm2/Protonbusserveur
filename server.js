@@ -233,7 +233,8 @@ function generateAccessKeyString() {
 }
 
 function publicRoom(room) {
-  const hostPlayer = room.players.get(room.hostId);
+  const hostId = room.hostSocketId || room.hostId;
+  const hostPlayer = room.players.get(hostId);
   const hostUsername = hostPlayer ? (hostPlayer.username || hostPlayer.pseudo) : '';
   return {
     id: room.id,
@@ -245,7 +246,8 @@ function publicRoom(room) {
     busId: room.busId,
     maxPlayers: room.maxPlayers,
     playerCount: room.players.size,
-    hostId: room.hostId,
+    hostId: hostId,
+    hostSocketId: hostId,
     hostUsername,
     players: Array.from(room.players.values()).map((p) => p.username || p.pseudo),
     createdAt: room.createdAt,
@@ -717,19 +719,61 @@ function membersOf(room) {
 
 const webRoom = (room) => `web:${room.id}`;
 
+async function validateActivationKey(socket, payloadKey) {
+  let keyToTest = payloadKey || socket.data?.keyCode || socket.user?.keyCode;
+  if (keyToTest && typeof keyToTest === 'string' && keyToTest.length > 20 && keyToTest.includes('.')) {
+    try {
+      const decoded = jwt.verify(keyToTest, JWT_SECRET);
+      if (decoded && decoded.keyCode) keyToTest = decoded.keyCode;
+    } catch (e) {}
+  }
+
+  if (keyToTest) {
+    const cleanKeyStr = cleanText(keyToTest, 60).toUpperCase();
+    const keyData = await db.findKeyByCode(cleanKeyStr);
+    if (!keyData) {
+      return { ok: false, error: 'INVALID_KEY', code: 'INVALID_KEY' };
+    }
+    if (keyData.expiresAt && keyData.expiresAt < Date.now()) {
+      return { ok: false, error: 'INVALID_KEY', code: 'INVALID_KEY' };
+    }
+    const existingSockId = activeSessions.get(keyData.keyCode);
+    if (existingSockId && existingSockId !== socket.id && io.sockets.sockets.has(existingSockId)) {
+      return { ok: false, error: 'Cette clé est actuellement active sur un autre téléphone/appareil.', code: 'KEY_ALREADY_ACTIVE' };
+    }
+    socket.user = socket.user || {
+      id: keyData.id,
+      username: keyData.playerName,
+      pseudo: keyData.playerName,
+      keyCode: keyData.keyCode,
+    };
+    socket.data.keyCode = keyData.keyCode;
+    activeSessions.set(keyData.keyCode, socket.id);
+    return { ok: true, keyData };
+  }
+
+  if (REQUIRE_AUTH) {
+    return { ok: false, error: 'INVALID_KEY', code: 'INVALID_KEY' };
+  }
+
+  return { ok: true, keyData: null };
+}
+
 function emitMembers(room) {
-  io.to(webRoom(room)).emit('roomMembers', { roomId: room.id, hostId: room.hostId, members: membersOf(room) });
+  const hostId = room.hostSocketId || room.hostId;
+  io.to(webRoom(room)).emit('roomMembers', { roomId: room.id, hostId, hostSocketId: hostId, members: membersOf(room) });
 }
 
 function emitBans(room) {
-  if (!room.hostId || !io.sockets.sockets.get(room.hostId)?.data.web) return;
-  io.to(room.hostId).emit('roomBans', {
+  const hostId = room.hostSocketId || room.hostId;
+  if (!hostId || !io.sockets.sockets.get(hostId)?.data.web) return;
+  io.to(hostId).emit('roomBans', {
     roomId: room.id,
     bans: Array.from(room.bans.entries()).map(([key, name]) => ({ key, name })),
   });
 }
 
-function joinRoomInternal(sock, roomId, { password, mapId, busId, username, pseudo, vehicleId, skinId, busInfo }) {
+function joinRoomInternal(sock, roomId, { password, mapId, busId, username, pseudo, vehicleId, skinId, skinPath, busInfo }) {
   const room = rooms.get(roomId);
   if (!room) return { ok: false, error: 'Room introuvable.' };
 
@@ -753,15 +797,28 @@ function joinRoomInternal(sock, roomId, { password, mapId, busId, username, pseu
     return { ok: false, error: `Incompatibilité de bus : la room exige busId="${room.busId}".`, code: 'BUS_MISMATCH' };
   }
 
+  const finalSkinId = String(skinId || 'default');
+  const finalSkinPath = cleanText(skinPath || skinId || 'default', 160);
+
   const player = {
     socketId: sock.id,
     userId,
     username: finalUsername,
     pseudo: finalUsername,
     vehicleId: String(vehicleId || busId || 'bus_default'),
-    skinId: String(skinId || 'default'),
+    skinId: finalSkinId,
+    skinPath: finalSkinPath,
     busInfo: cleanBusInfo(busInfo),
     transform: null,
+    headlight: false,
+    turnLeft: false,
+    turnRight: false,
+    hazard: false,
+    brake: false,
+    reverse: false,
+    showNameTag: true,
+    showVoiceIcon: false,
+    isTalking: false,
     lastUpdateTs: 0,
     inVoice: false,
     muted: false,
@@ -778,7 +835,17 @@ function joinRoomInternal(sock, roomId, { password, mapId, busId, username, pseu
     pseudo: player.pseudo,
     vehicleId: player.vehicleId,
     skinId: player.skinId,
+    skinPath: player.skinPath,
     busInfo: player.busInfo,
+    headlight: player.headlight,
+    turnLeft: player.turnLeft,
+    turnRight: player.turnRight,
+    hazard: player.hazard,
+    brake: player.brake,
+    reverse: player.reverse,
+    showNameTag: player.showNameTag,
+    showVoiceIcon: player.showVoiceIcon,
+    isTalking: player.isTalking,
   });
 
   sock.emit('roomState', {
@@ -792,13 +859,23 @@ function joinRoomInternal(sock, roomId, { password, mapId, busId, username, pseu
         pseudo: p.pseudo,
         vehicleId: p.vehicleId,
         skinId: p.skinId,
+        skinPath: p.skinPath,
         busInfo: p.busInfo,
         transform: p.transform,
+        headlight: p.headlight,
+        turnLeft: p.turnLeft,
+        turnRight: p.turnRight,
+        hazard: p.hazard,
+        brake: p.brake,
+        reverse: p.reverse,
+        showNameTag: p.showNameTag,
+        showVoiceIcon: p.showVoiceIcon,
+        isTalking: p.isTalking,
       })),
   });
 
   emitMembers(room);
-  if (room.hostId === sock.id) emitBans(room);
+  if ((room.hostSocketId || room.hostId) === sock.id) emitBans(room);
   return { ok: true, room: publicRoom(room) };
 }
 
@@ -824,13 +901,22 @@ function removeFromRoom(sock) {
   if (room.players.size === 0) {
     rooms.delete(room.id);
   } else {
-    if (room.hostId === sock.id) {
+    const currentHostId = room.hostSocketId || room.hostId;
+    if (currentHostId === sock.id) {
       const nextHost = Array.from(room.players.values())[0];
       room.hostId = nextHost.socketId;
+      room.hostSocketId = nextHost.socketId;
+      const newHostPseudo = nextHost.pseudo || nextHost.username;
+
+      io.to(room.id).emit('roomHostChanged', {
+        newHostSocketId: nextHost.socketId,
+        newHostPseudo: newHostPseudo,
+      });
+
       io.to(room.id).emit('hostChanged', {
         newHostId: nextHost.socketId,
         newHostUsername: nextHost.username,
-        newHostPseudo: nextHost.pseudo,
+        newHostPseudo: newHostPseudo,
         room: publicRoom(room),
       });
       emitBans(room);
@@ -867,7 +953,7 @@ io.on('connection', (socket) => {
     if (typeof callback === 'function') callback({ ok: true, rooms: roomList });
   });
 
-  socket.on('createRoom', (payload, callback) => {
+  socket.on('createRoom', async (payload, callback) => {
     const ack = typeof callback === 'function' ? callback : () => {};
     try {
       if (!validatePayloadSize(payload, 30, 500)) {
@@ -881,6 +967,11 @@ io.on('connection', (socket) => {
         return ack({ ok: false, error: 'Trop de tentatives de création de salons. Veuillez patienter.' });
       }
 
+      const keyVal = await validateActivationKey(socket, payload?.activationKey || payload?.key || payload?.token);
+      if (!keyVal.ok) {
+        return ack({ ok: false, error: keyVal.error || 'INVALID_KEY', code: keyVal.code || 'INVALID_KEY' });
+      }
+
       const hmacResult = verifyHmacSignature('createRoom', payload);
       if (!hmacResult.ok) {
         logSecuThrottled(`createRoom_hmac_${socket.id}`, `Signature HMAC createRoom invalid/refused pour ${socket.id}: ${hmacResult.reason}`);
@@ -889,7 +980,7 @@ io.on('connection', (socket) => {
         }
       }
 
-      const { roomName, name, isPrivate, password, mapId, busId, maxPlayers, username: pu, pseudo: pp } = payload || {};
+      const { roomName, name, isPrivate, password, mapId, busId, maxPlayers, username: pu, pseudo: pp, vehicleId, skinId, skinPath, busInfo } = payload || {};
       const username = socket.user?.username || socket.user?.pseudo || pu || pp || `Joueur_${socket.id.slice(0, 5)}`;
 
       const finalRoomName = cleanText(roomName || name, 60);
@@ -908,13 +999,14 @@ io.on('connection', (socket) => {
         busId: finalBusId,
         maxPlayers: Number.isInteger(maxPlayers) && maxPlayers > 0 ? Math.min(maxPlayers, 64) : DEFAULT_MAX_PLAYERS,
         hostId: socket.id,
+        hostSocketId: socket.id,
         players: new Map(),
         bans: new Map(),
         createdAt: Date.now(),
       };
       rooms.set(room.id, room);
 
-      const joinResult = joinRoomInternal(socket, room.id, { password, mapId: finalMapId, busId: finalBusId, username, pseudo: username });
+      const joinResult = joinRoomInternal(socket, room.id, { password, mapId: finalMapId, busId: finalBusId, username, pseudo: username, vehicleId, skinId, skinPath, busInfo });
       if (!joinResult.ok) {
         rooms.delete(room.id);
         return ack(joinResult);
@@ -927,7 +1019,7 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('joinRoom', (payload, callback) => {
+  socket.on('joinRoom', async (payload, callback) => {
     const ack = typeof callback === 'function' ? callback : () => {};
     try {
       if (!validatePayloadSize(payload, 30, 500)) {
@@ -937,6 +1029,11 @@ io.on('connection', (socket) => {
 
       const { roomId } = payload || {};
       if (!roomId) return ack({ ok: false, error: 'roomId requis.' });
+
+      const keyVal = await validateActivationKey(socket, payload?.activationKey || payload?.key || payload?.token);
+      if (!keyVal.ok) {
+        return ack({ ok: false, error: keyVal.error || 'INVALID_KEY', code: keyVal.code || 'INVALID_KEY' });
+      }
 
       const hmacResult = verifyHmacSignature('joinRoom', payload, String(roomId));
       if (!hmacResult.ok) {
@@ -1151,11 +1248,19 @@ io.on('connection', (socket) => {
     const ctrl = controls || {};
     const steerInput = Number(ctrl.steerInput ?? payload.steerInput) || 0;
     const throttle = Number(ctrl.throttle ?? payload.throttle) || 0;
-    const brake = Number(ctrl.brake ?? payload.brake) || 0;
+    const brakeCtrl = Number(ctrl.brake ?? payload.brake) || 0;
     const handbrake = Number(ctrl.handbrake ?? payload.handbrake) || 0;
+
+    const headlight = Boolean(payload.headlight ?? false);
+    const turnLeft = Boolean(payload.turnLeft ?? false);
+    const turnRight = Boolean(payload.turnRight ?? false);
+    const hazard = Boolean(payload.hazard ?? false);
+    const brake = Boolean(payload.brake ?? (brakeCtrl > 0));
+    const reverse = Boolean(payload.reverse ?? false);
 
     if (payload.vehicleId) player.vehicleId = cleanText(payload.vehicleId, 80);
     if (payload.skinId) player.skinId = cleanText(payload.skinId, 80);
+    if (payload.skinPath) player.skinPath = cleanText(payload.skinPath, 160);
     const cleanedBusInfo = cleanBusInfo(payload.busInfo);
     if (cleanedBusInfo) player.busInfo = cleanedBusInfo;
 
@@ -1163,11 +1268,21 @@ io.on('connection', (socket) => {
     const showVoiceIcon = payload.showVoiceIcon ?? false;
     const isTalking = payload.isTalking ?? false;
 
+    player.headlight = headlight;
+    player.turnLeft = turnLeft;
+    player.turnRight = turnRight;
+    player.hazard = hazard;
+    player.brake = brake;
+    player.reverse = reverse;
+    player.showNameTag = showNameTag;
+    player.showVoiceIcon = showVoiceIcon;
+    player.isTalking = isTalking;
+
     const transform = {
       position: { x: Number(position.x) || 0, y: Number(position.y) || 0, z: Number(position.z) || 0 },
       rotation: { x: Number(rotation.x) || 0, y: Number(rotation.y) || 0, z: Number(rotation.z) || 0, w: Number(rotation.w) || 1 },
-      controls: { steerInput, throttle, brake, handbrake },
-      steerInput, throttle, brake, handbrake,
+      controls: { steerInput, throttle, brake: brakeCtrl, handbrake },
+      steerInput, throttle, brake: brakeCtrl, handbrake,
       ts: now,
     };
     player.transform = transform;
@@ -1180,11 +1295,13 @@ io.on('connection', (socket) => {
       pseudo: player.pseudo,
       vehicleId: player.vehicleId,
       skinId: player.skinId,
+      skinPath: player.skinPath,
       ...(cleanedBusInfo ? { busInfo: cleanedBusInfo } : {}),
       position: transform.position,
       rotation: transform.rotation,
       controls: transform.controls,
-      steerInput, throttle, brake, handbrake,
+      steerInput, throttle, brake: brakeCtrl, handbrake,
+      headlight, turnLeft, turnRight, hazard, brake, reverse,
       showNameTag, showVoiceIcon, isTalking,
       transform,
     });
