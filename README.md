@@ -28,4 +28,4 @@ Ce dépôt se synchronise automatiquement vers le Space Hugging Face
 - `public/` — ancien dashboard de test (désactivé par défaut, `ENABLE_DASHBOARD=true`)
 - `DEPLOY.md` — **guide de déploiement complet et notes de sécurité**
 
-Voir `GUIDE-APK.md` pour l'installation du mod côté APK.
+Voir `GUIDE-APK.md` pour l'installation du mod côté APK et `SERVER.md` pour le guide d'optimisation et spécifications ProtonBusSync.
