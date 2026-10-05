@@ -1222,11 +1222,17 @@ io.on('connection', (socket) => {
     io.to(target.socketId).emit('voice:signal', { from: socket.id, data: payload.data });
   });
 
-  socket.on('vehicleUpdate', (payload) => {
+  socket.on('vehicleUpdate', (payloadRaw) => {
     const room = getRoomOf(socket);
     if (!room) return;
     const player = room.players.get(socket.id);
     if (!player) return;
+
+    let payload = payloadRaw;
+    if (typeof payload === 'string') {
+      try { payload = JSON.parse(payload); } catch (e) { return; }
+    }
+    if (!payload || typeof payload !== 'object') return;
 
     if (!validatePayloadSize(payload, 50, 500)) {
       logSecuThrottled(`vUpd_size_${socket.id}`, `Socket ${socket.id} - Payload vehicleUpdate invalide ou trop grand.`);
@@ -1247,16 +1253,60 @@ io.on('connection', (socket) => {
     }
 
     const now = Date.now();
-    if (now - player.lastUpdateTs < MIN_TICK_INTERVAL_MS) return;
+    if (now - player.lastUpdateTs < 10) return; // allow 60Hz tick or network jitter
     player.lastUpdateTs = now;
 
-    if (!payload || typeof payload !== 'object') return;
-    const position = payload.position || (payload.x !== undefined ? { x: payload.x, y: payload.y, z: payload.z } : null);
-    const rotation = payload.rotation || (payload.rotX !== undefined ? { x: payload.rotX, y: payload.rotY, z: payload.rotZ, w: payload.rotW } : null);
-    const controls = payload.controls;
-    if (!position || !rotation) return;
+    let posX = null, posY = null, posZ = null;
+    if (payload.position && typeof payload.position === 'object') {
+      if (Array.isArray(payload.position)) {
+        posX = Number(payload.position[0]);
+        posY = Number(payload.position[1]);
+        posZ = Number(payload.position[2]);
+      } else {
+        posX = Number(payload.position.x);
+        posY = Number(payload.position.y);
+        posZ = Number(payload.position.z);
+      }
+    }
+    if (posX === null || isNaN(posX)) {
+      if (payload.x !== undefined && payload.x !== null) {
+        posX = Number(payload.x);
+        posY = Number(payload.y);
+        posZ = Number(payload.z);
+      }
+    }
 
-    const ctrl = controls || {};
+    let rotX = null, rotY = null, rotZ = null, rotW = 1;
+    if (payload.rotation && typeof payload.rotation === 'object') {
+      if (Array.isArray(payload.rotation)) {
+        rotX = Number(payload.rotation[0]);
+        rotY = Number(payload.rotation[1]);
+        rotZ = Number(payload.rotation[2]);
+        rotW = Number(payload.rotation[3] ?? 1);
+      } else {
+        rotX = Number(payload.rotation.x);
+        rotY = Number(payload.rotation.y);
+        rotZ = Number(payload.rotation.z);
+        rotW = Number(payload.rotation.w ?? 1);
+      }
+    }
+    if (rotX === null || isNaN(rotX)) {
+      if (payload.rotX !== undefined && payload.rotX !== null) {
+        rotX = Number(payload.rotX);
+        rotY = Number(payload.rotY);
+        rotZ = Number(payload.rotZ);
+        rotW = Number(payload.rotW ?? 1);
+      }
+    }
+
+    if (posX === null || isNaN(posX) || posY === null || isNaN(posY) || posZ === null || isNaN(posZ)) {
+      return;
+    }
+    if (rotX === null || isNaN(rotX) || rotY === null || isNaN(rotY) || rotZ === null || isNaN(rotZ)) {
+      rotX = 0; rotY = 0; rotZ = 0; rotW = 1;
+    }
+
+    const ctrl = payload.controls || {};
     const steerInput = Number(ctrl.steerInput ?? payload.steerInput) || 0;
     const throttle = Number(ctrl.throttle ?? payload.throttle) || 0;
     const brakeCtrl = Number(ctrl.brake ?? payload.brake) || 0;
@@ -1301,23 +1351,15 @@ io.on('connection', (socket) => {
     player.isTalking = isTalking;
 
     const transform = {
-      position: { x: Number(position.x) || 0, y: Number(position.y) || 0, z: Number(position.z) || 0 },
-      rotation: { x: Number(rotation.x) || 0, y: Number(rotation.y) || 0, z: Number(rotation.z) || 0, w: Number(rotation.w) || 1 },
+      position: { x: posX, y: posY, z: posZ },
+      rotation: { x: rotX, y: rotY, z: rotZ, w: rotW },
       controls: { steerInput, throttle, brake: brakeCtrl, handbrake },
       steerInput, throttle, brake: brakeCtrl, handbrake,
       ts: now,
     };
     player.transform = transform;
 
-    const x = transform.position.x;
-    const y = transform.position.y;
-    const z = transform.position.z;
-    const rotX = transform.rotation.x;
-    const rotY = transform.rotation.y;
-    const rotZ = transform.rotation.z;
-    const rotW = transform.rotation.w;
-
-    socket.to(room.id).volatile.emit('vehicleUpdate', {
+    socket.to(room.id).emit('vehicleUpdate', {
       roomId: room.id,
       socketId: socket.id,
       userId: player.userId,
@@ -1329,7 +1371,7 @@ io.on('connection', (socket) => {
       skinPath: player.skinPath,
       skinTex: player.skinPath || player.skinId,
       ...(cleanedBusInfo ? { busInfo: cleanedBusInfo } : {}),
-      x, y, z,
+      x: posX, y: posY, z: posZ,
       rotX, rotY, rotZ, rotW,
       position: transform.position,
       rotation: transform.rotation,
