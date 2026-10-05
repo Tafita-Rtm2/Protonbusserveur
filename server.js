@@ -203,9 +203,104 @@ function checkVehicleUpdateRateLimit(socket) {
   return true;
 }
 
-function isTruthy(v) {
+function isTruthyVal(v) {
   if (v === true || v === 1 || v === '1' || v === 'true' || v === 'True' || v === 'TRUE') return true;
   return false;
+}
+
+function extractLighting(payload, brakeCtrl = 0) {
+  const headlight = isTruthyVal(
+    payload.headlight ?? payload.headLight ?? payload.head_light ??
+    payload.lights ?? payload.light ?? payload.luzes ?? payload.luz
+  );
+  const turnLeft = isTruthyVal(
+    payload.turnLeft ?? payload.turn_left ?? payload.turnleft ?? payload.leftSignal ??
+    payload.indicatorLeft ?? payload.leftIndicator ?? payload.setaEsquerda ?? payload.seta_esquerda
+  );
+  const turnRight = isTruthyVal(
+    payload.turnRight ?? payload.turn_right ?? payload.turnright ?? payload.rightSignal ??
+    payload.indicatorRight ?? payload.rightIndicator ?? payload.setaDireita ?? payload.seta_direita
+  );
+  const hazard = isTruthyVal(
+    payload.hazard ?? payload.hazards ?? payload.hazardLight ?? payload.hazard_light ??
+    payload.piscaAlerta ?? payload.pisca_alerta ?? payload.pisca
+  );
+  const brake = isTruthyVal(
+    payload.brake ?? payload.brakeLight ?? payload.brake_light ?? payload.stopLight ??
+    payload.freio ?? payload.freios ?? (brakeCtrl > 0)
+  );
+  const reverse = isTruthyVal(
+    payload.reverse ?? payload.reverseLight ?? payload.reverse_light ?? payload.reversing ??
+    payload.marchaRe ?? payload.marcha_re ?? payload.re
+  );
+  return { headlight, turnLeft, turnRight, hazard, brake, reverse };
+}
+
+function playerBroadcastObj(player, extra = {}) {
+  const t = player.transform || {
+    position: { x: 0, y: 0, z: 0 },
+    rotation: { x: 0, y: 0, z: 0, w: 1 },
+    controls: { steerInput: 0, throttle: 0, brake: 0, handbrake: 0 },
+  };
+
+  const x = Number(t.position?.x) || 0;
+  const y = Number(t.position?.y) || 0;
+  const z = Number(t.position?.z) || 0;
+  const rotX = Number(t.rotation?.x) || 0;
+  const rotY = Number(t.rotation?.y) || 0;
+  const rotZ = Number(t.rotation?.z) || 0;
+  const rotW = Number(t.rotation?.w ?? 1);
+
+  const headlight = Boolean(player.headlight);
+  const turnLeft = Boolean(player.turnLeft);
+  const turnRight = Boolean(player.turnRight);
+  const hazard = Boolean(player.hazard);
+  const brake = Boolean(player.brake);
+  const reverse = Boolean(player.reverse);
+
+  return {
+    socketId: player.socketId,
+    userId: player.userId,
+    username: player.username,
+    pseudo: player.pseudo,
+    name: player.pseudo,
+    playerName: player.pseudo,
+    player_name: player.pseudo,
+    nick: player.pseudo,
+    vehicleId: player.vehicleId,
+    vehicle_id: player.vehicleId,
+    busId: player.vehicleId,
+    bus_id: player.vehicleId,
+    skinId: player.skinId,
+    skin_id: player.skinId,
+    skinPath: player.skinPath,
+    skin_path: player.skinPath,
+    skinTex: player.skinPath || player.skinId,
+    skin_tex: player.skinPath || player.skinId,
+    skinName: player.skinPath || player.skinId,
+    skinBus: player.skinPath || player.skinId,
+    ...(player.busInfo ? { busInfo: player.busInfo } : {}),
+    x, y, z,
+    rotX, rotY, rotZ, rotW,
+    position: { x, y, z },
+    rotation: { x: rotX, y: rotY, z: rotZ, w: rotW },
+    transform: t,
+    controls: t.controls || {},
+    steerInput: t.controls?.steerInput || 0,
+    throttle: t.controls?.throttle || 0,
+    brake: t.controls?.brake || 0,
+    handbrake: t.controls?.handbrake || 0,
+    headlight, headLight: headlight, head_light: headlight, lights: headlight, luzes: headlight,
+    turnLeft, turn_left: turnLeft, indicatorLeft: turnLeft, setaEsquerda: turnLeft,
+    turnRight, turn_right: turnRight, indicatorRight: turnRight, setaDireita: turnRight,
+    hazard, hazards: hazard, hazardLight: hazard, piscaAlerta: hazard, pisca: hazard,
+    brake, brakeLight: brake, brake_light: brake, stopLight: brake, freio: brake,
+    reverse, reverseLight: reverse, reverse_light: reverse, marchaRe: reverse,
+    showNameTag: player.showNameTag ?? true,
+    showVoiceIcon: player.showVoiceIcon ?? false,
+    isTalking: player.isTalking ?? false,
+    ...extra,
+  };
 }
 
 function validatePayloadSize(payload, maxKeys = 30, maxStringLen = 500) {
@@ -833,61 +928,13 @@ function joinRoomInternal(sock, roomId, { password, mapId, busId, username, pseu
   if (sock.data.web) sock.join(webRoom(room));
   sock.data.roomId = room.id;
 
-  sock.to(room.id).emit('playerJoined', {
-    socketId: sock.id,
-    userId: player.userId,
-    username: player.username,
-    pseudo: player.pseudo,
-    name: player.pseudo,
-    vehicleId: player.vehicleId,
-    skinId: player.skinId,
-    skinPath: player.skinPath,
-    skinTex: player.skinPath || player.skinId,
-    busInfo: player.busInfo,
-    headlight: player.headlight,
-    turnLeft: player.turnLeft,
-    turnRight: player.turnRight,
-    hazard: player.hazard,
-    brake: player.brake,
-    reverse: player.reverse,
-    showNameTag: player.showNameTag,
-    showVoiceIcon: player.showVoiceIcon,
-    isTalking: player.isTalking,
-  });
+  sock.to(room.id).emit('playerJoined', playerBroadcastObj(player));
 
   sock.emit('roomState', {
     room: publicRoom(room),
     players: Array.from(room.players.values())
       .filter((p) => p.socketId !== sock.id)
-      .map((p) => ({
-        socketId: p.socketId,
-        userId: p.userId,
-        username: p.username,
-        pseudo: p.pseudo,
-        name: p.pseudo,
-        vehicleId: p.vehicleId,
-        skinId: p.skinId,
-        skinPath: p.skinPath,
-        skinTex: p.skinPath || p.skinId,
-        busInfo: p.busInfo,
-        transform: p.transform,
-        x: p.transform?.position?.x ?? 0,
-        y: p.transform?.position?.y ?? 0,
-        z: p.transform?.position?.z ?? 0,
-        rotX: p.transform?.rotation?.x ?? 0,
-        rotY: p.transform?.rotation?.y ?? 0,
-        rotZ: p.transform?.rotation?.z ?? 0,
-        rotW: p.transform?.rotation?.w ?? 1,
-        headlight: p.headlight,
-        turnLeft: p.turnLeft,
-        turnRight: p.turnRight,
-        hazard: p.hazard,
-        brake: p.brake,
-        reverse: p.reverse,
-        showNameTag: p.showNameTag,
-        showVoiceIcon: p.showVoiceIcon,
-        isTalking: p.isTalking,
-      })),
+      .map((p) => playerBroadcastObj(p)),
   });
 
   emitMembers(room);
@@ -1239,7 +1286,7 @@ io.on('connection', (socket) => {
     }
     if (!payload || typeof payload !== 'object') return;
 
-    if (!validatePayloadSize(payload, 120, 2000)) {
+    if (!validatePayloadSize(payload, 150, 3000)) {
       logSecuThrottled(`vUpd_size_${socket.id}`, `Socket ${socket.id} - Payload vehicleUpdate invalide ou trop grand.`);
       return;
     }
@@ -1267,16 +1314,19 @@ io.on('connection', (socket) => {
         posY = Number(payload.position[1]);
         posZ = Number(payload.position[2]);
       } else {
-        posX = Number(payload.position.x);
-        posY = Number(payload.position.y);
-        posZ = Number(payload.position.z);
+        posX = Number(payload.position.x ?? payload.position.X);
+        posY = Number(payload.position.y ?? payload.position.Y);
+        posZ = Number(payload.position.z ?? payload.position.Z);
       }
     }
     if (posX === null || isNaN(posX)) {
-      if (payload.x !== undefined && payload.x !== null) {
-        posX = Number(payload.x);
-        posY = Number(payload.y);
-        posZ = Number(payload.z);
+      const px = payload.x ?? payload.X ?? payload.posX ?? payload.pos_x ?? payload.px;
+      const py = payload.y ?? payload.Y ?? payload.posY ?? payload.pos_y ?? payload.py;
+      const pz = payload.z ?? payload.Z ?? payload.posZ ?? payload.pos_z ?? payload.pz;
+      if (px !== undefined && px !== null) {
+        posX = Number(px);
+        posY = Number(py);
+        posZ = Number(pz);
       }
     }
 
@@ -1288,27 +1338,36 @@ io.on('connection', (socket) => {
         rotZ = Number(payload.rotation[2]);
         rotW = Number(payload.rotation[3] ?? 1);
       } else {
-        rotX = Number(payload.rotation.x);
-        rotY = Number(payload.rotation.y);
-        rotZ = Number(payload.rotation.z);
-        rotW = Number(payload.rotation.w ?? 1);
+        rotX = Number(payload.rotation.x ?? payload.rotation.X);
+        rotY = Number(payload.rotation.y ?? payload.rotation.Y);
+        rotZ = Number(payload.rotation.z ?? payload.rotation.Z);
+        rotW = Number(payload.rotation.w ?? payload.rotation.W ?? 1);
       }
     }
     if (rotX === null || isNaN(rotX)) {
-      if (payload.rotX !== undefined && payload.rotX !== null) {
-        rotX = Number(payload.rotX);
-        rotY = Number(payload.rotY);
-        rotZ = Number(payload.rotZ);
-        rotW = Number(payload.rotW ?? 1);
+      const rx = payload.rotX ?? payload.rot_x ?? payload.rx;
+      const ry = payload.rotY ?? payload.rot_y ?? payload.ry;
+      const rz = payload.rotZ ?? payload.rot_z ?? payload.rz;
+      const rw = payload.rotW ?? payload.rot_w ?? payload.rw;
+      if (rx !== undefined && rx !== null) {
+        rotX = Number(rx);
+        rotY = Number(ry);
+        rotZ = Number(rz);
+        rotW = Number(rw ?? 1);
       }
     }
 
-    if (posX === null || isNaN(posX) || posY === null || isNaN(posY) || posZ === null || isNaN(posZ)) {
-      return;
-    }
-    if (rotX === null || isNaN(rotX) || rotY === null || isNaN(rotY) || rotZ === null || isNaN(rotZ)) {
-      rotX = 0; rotY = 0; rotZ = 0; rotW = 1;
-    }
+    const prevPos = player.transform?.position || { x: 0, y: 0, z: 0 };
+    const prevRot = player.transform?.rotation || { x: 0, y: 0, z: 0, w: 1 };
+
+    if (posX === null || isNaN(posX)) posX = prevPos.x;
+    if (posY === null || isNaN(posY)) posY = prevPos.y;
+    if (posZ === null || isNaN(posZ)) posZ = prevPos.z;
+
+    if (rotX === null || isNaN(rotX)) rotX = prevRot.x;
+    if (rotY === null || isNaN(rotY)) rotY = prevRot.y;
+    if (rotZ === null || isNaN(rotZ)) rotZ = prevRot.z;
+    if (rotW === null || isNaN(rotW)) rotW = prevRot.w;
 
     const ctrl = payload.controls || {};
     const steerInput = Number(ctrl.steerInput ?? payload.steerInput) || 0;
@@ -1316,80 +1375,50 @@ io.on('connection', (socket) => {
     const brakeCtrl = Number(ctrl.brake ?? payload.brake) || 0;
     const handbrake = Number(ctrl.handbrake ?? payload.handbrake) || 0;
 
-    const headlight = isTruthy(payload.headlight ?? payload.headLight ?? payload.lights);
-    const turnLeft = isTruthy(payload.turnLeft ?? payload.turn_left ?? payload.indicatorLeft);
-    const turnRight = isTruthy(payload.turnRight ?? payload.turn_right ?? payload.indicatorRight);
-    const hazard = isTruthy(payload.hazard ?? payload.hazards ?? payload.hazardLight);
-    const brake = isTruthy(payload.brake ?? payload.brakeLight ?? payload.stopLight ?? (brakeCtrl > 0));
-    const reverse = isTruthy(payload.reverse ?? payload.reverseLight ?? payload.reversing);
+    const lights = extractLighting(payload, brakeCtrl);
 
-    if (payload.vehicleId) player.vehicleId = cleanText(payload.vehicleId, 80);
-    if (payload.skinId) player.skinId = cleanText(payload.skinId, 80);
-    if (payload.skinPath) player.skinPath = cleanText(payload.skinPath, 160);
-    if (payload.skinTex) {
-      const st = cleanText(payload.skinTex, 160);
-      if (st) player.skinPath = st;
-    }
-    if (payload.pseudo || payload.username || payload.name) {
-      const pName = cleanText(payload.pseudo || payload.username || payload.name, 24);
+    const nameCandidate = payload.pseudo ?? payload.username ?? payload.playerName ?? payload.player_name ?? payload.name ?? payload.nick;
+    if (nameCandidate) {
+      const pName = cleanText(nameCandidate, 24);
       if (pName) {
         player.pseudo = pName;
         player.username = pName;
       }
     }
+
+    const skinCandidate = payload.skinPath ?? payload.skin_path ?? payload.skinTex ?? payload.skin_tex ?? payload.skinId ?? payload.skin_id ?? payload.skinBus ?? payload.skinName ?? payload.skin;
+    if (skinCandidate) {
+      const st = cleanText(skinCandidate, 160);
+      if (st) player.skinPath = st;
+    }
+
+    if (payload.vehicleId || payload.vehicle_id || payload.busId || payload.bus_id) {
+      player.vehicleId = cleanText(payload.vehicleId || payload.vehicle_id || payload.busId || payload.bus_id, 80);
+    }
+
     const cleanedBusInfo = cleanBusInfo(payload.busInfo);
     if (cleanedBusInfo) player.busInfo = cleanedBusInfo;
 
-    const showNameTag = payload.showNameTag ?? true;
-    const showVoiceIcon = payload.showVoiceIcon ?? false;
-    const isTalking = payload.isTalking ?? false;
+    player.headlight = lights.headlight;
+    player.turnLeft = lights.turnLeft;
+    player.turnRight = lights.turnRight;
+    player.hazard = lights.hazard;
+    player.brake = lights.brake;
+    player.reverse = lights.reverse;
 
-    player.headlight = headlight;
-    player.turnLeft = turnLeft;
-    player.turnRight = turnRight;
-    player.hazard = hazard;
-    player.brake = brake;
-    player.reverse = reverse;
-    player.showNameTag = showNameTag;
-    player.showVoiceIcon = showVoiceIcon;
-    player.isTalking = isTalking;
+    if (payload.showNameTag !== undefined) player.showNameTag = Boolean(payload.showNameTag);
+    if (payload.showVoiceIcon !== undefined) player.showVoiceIcon = Boolean(payload.showVoiceIcon);
+    if (payload.isTalking !== undefined) player.isTalking = Boolean(payload.isTalking);
 
-    const transform = {
+    player.transform = {
       position: { x: posX, y: posY, z: posZ },
       rotation: { x: rotX, y: rotY, z: rotZ, w: rotW },
       controls: { steerInput, throttle, brake: brakeCtrl, handbrake },
       steerInput, throttle, brake: brakeCtrl, handbrake,
       ts: now,
     };
-    player.transform = transform;
 
-    socket.to(room.id).emit('vehicleUpdate', {
-      roomId: room.id,
-      socketId: socket.id,
-      userId: player.userId,
-      username: player.username,
-      pseudo: player.pseudo,
-      name: player.pseudo,
-      vehicleId: player.vehicleId,
-      skinId: player.skinId,
-      skinPath: player.skinPath,
-      skinTex: player.skinPath || player.skinId,
-      ...(cleanedBusInfo ? { busInfo: cleanedBusInfo } : {}),
-      x: posX, y: posY, z: posZ,
-      rotX, rotY, rotZ, rotW,
-      position: transform.position,
-      rotation: transform.rotation,
-      controls: transform.controls,
-      steerInput, throttle, brake: brakeCtrl, handbrake,
-      headlight, headLight: headlight, lights: headlight,
-      turnLeft, turn_left: turnLeft,
-      turnRight, turn_right: turnRight,
-      hazard, hazards: hazard,
-      brake, brakeLight: brake, stopLight: brake,
-      reverse, reverseLight: reverse,
-      showNameTag, showVoiceIcon, isTalking,
-      transform,
-    });
+    socket.to(room.id).emit('vehicleUpdate', playerBroadcastObj(player, { roomId: room.id }));
   });
 
   socket.on('disconnect', (reason) => {
