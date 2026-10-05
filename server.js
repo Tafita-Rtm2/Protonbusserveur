@@ -778,7 +778,7 @@ function emitBans(room) {
   });
 }
 
-function joinRoomInternal(sock, roomId, { password, mapId, busId, username, pseudo, vehicleId, skinId, skinPath, skinTex, busInfo }) {
+function joinRoomInternal(sock, roomId, { password, mapId, busId, username, pseudo, vehicleId, skinId, skinPath, skinTex, skin, skinName, busInfo }) {
   const room = rooms.get(roomId);
   if (!room) return { ok: false, error: 'Room introuvable.' };
 
@@ -803,7 +803,8 @@ function joinRoomInternal(sock, roomId, { password, mapId, busId, username, pseu
   }
 
   const finalSkinId = String(skinId || 'default');
-  const finalSkinPath = cleanText(skinPath || skinTex || skinId || 'default', 160);
+  const rawSkinPath = skinPath || skinTex || skin || skinName || skinId || 'default';
+  const finalSkinPath = cleanText(rawSkinPath, 160);
 
   const player = {
     socketId: sock.id,
@@ -834,6 +835,7 @@ function joinRoomInternal(sock, roomId, { password, mapId, busId, username, pseu
   sock.data.roomId = room.id;
 
   sock.to(room.id).emit('playerJoined', {
+    id: sock.id,
     socketId: sock.id,
     userId: player.userId,
     username: player.username,
@@ -843,6 +845,8 @@ function joinRoomInternal(sock, roomId, { password, mapId, busId, username, pseu
     skinId: player.skinId,
     skinPath: player.skinPath,
     skinTex: player.skinPath || player.skinId,
+    skin: player.skinPath,
+    skinName: player.skinPath,
     busInfo: player.busInfo,
     headlight: player.headlight,
     turnLeft: player.turnLeft,
@@ -860,6 +864,7 @@ function joinRoomInternal(sock, roomId, { password, mapId, busId, username, pseu
     players: Array.from(room.players.values())
       .filter((p) => p.socketId !== sock.id)
       .map((p) => ({
+        id: p.socketId,
         socketId: p.socketId,
         userId: p.userId,
         username: p.username,
@@ -869,8 +874,12 @@ function joinRoomInternal(sock, roomId, { password, mapId, busId, username, pseu
         skinId: p.skinId,
         skinPath: p.skinPath,
         skinTex: p.skinPath || p.skinId,
+        skin: p.skinPath,
+        skinName: p.skinPath,
         busInfo: p.busInfo,
         transform: p.transform,
+        position: p.transform?.position || { x: 0, y: 0, z: 0 },
+        rotation: p.transform?.rotation || { x: 0, y: 0, z: 0, w: 1 },
         x: p.transform?.position?.x ?? 0,
         y: p.transform?.position?.y ?? 0,
         z: p.transform?.position?.z ?? 0,
@@ -1260,54 +1269,72 @@ io.on('connection', (socket) => {
     const now = Date.now();
     player.lastUpdateTs = now;
 
+    const rawPos = payload.position || payload.pos;
     let posX = null, posY = null, posZ = null;
-    if (payload.position && typeof payload.position === 'object') {
-      if (Array.isArray(payload.position)) {
-        posX = Number(payload.position[0]);
-        posY = Number(payload.position[1]);
-        posZ = Number(payload.position[2]);
+    if (rawPos && typeof rawPos === 'object') {
+      if (Array.isArray(rawPos)) {
+        posX = Number(rawPos[0]);
+        posY = Number(rawPos[1]);
+        posZ = Number(rawPos[2]);
       } else {
-        posX = Number(payload.position.x);
-        posY = Number(payload.position.y);
-        posZ = Number(payload.position.z);
+        posX = Number(rawPos.x ?? rawPos.X ?? rawPos.posX);
+        posY = Number(rawPos.y ?? rawPos.Y ?? rawPos.posY);
+        posZ = Number(rawPos.z ?? rawPos.Z ?? rawPos.posZ);
       }
     }
     if (posX === null || isNaN(posX)) {
-      if (payload.x !== undefined && payload.x !== null) {
-        posX = Number(payload.x);
-        posY = Number(payload.y);
-        posZ = Number(payload.z);
-      }
+      const px = payload.x ?? payload.X ?? payload.posX;
+      const py = payload.y ?? payload.Y ?? payload.posY;
+      const pz = payload.z ?? payload.Z ?? payload.posZ;
+      if (px !== undefined && px !== null) posX = Number(px);
+      if (py !== undefined && py !== null) posY = Number(py);
+      if (pz !== undefined && pz !== null) posZ = Number(pz);
     }
 
+    const rawRot = payload.rotation || payload.rot;
     let rotX = null, rotY = null, rotZ = null, rotW = 1;
-    if (payload.rotation && typeof payload.rotation === 'object') {
-      if (Array.isArray(payload.rotation)) {
-        rotX = Number(payload.rotation[0]);
-        rotY = Number(payload.rotation[1]);
-        rotZ = Number(payload.rotation[2]);
-        rotW = Number(payload.rotation[3] ?? 1);
+    if (rawRot && typeof rawRot === 'object') {
+      if (Array.isArray(rawRot)) {
+        rotX = Number(rawRot[0]);
+        rotY = Number(rawRot[1]);
+        rotZ = Number(rawRot[2]);
+        rotW = Number(rawRot[3] ?? 1);
       } else {
-        rotX = Number(payload.rotation.x);
-        rotY = Number(payload.rotation.y);
-        rotZ = Number(payload.rotation.z);
-        rotW = Number(payload.rotation.w ?? 1);
+        rotX = Number(rawRot.x ?? rawRot.X ?? rawRot.rotX);
+        rotY = Number(rawRot.y ?? rawRot.Y ?? rawRot.rotY);
+        rotZ = Number(rawRot.z ?? rawRot.Z ?? rawRot.rotZ);
+        rotW = Number(rawRot.w ?? rawRot.W ?? rawRot.rotW ?? 1);
       }
     }
     if (rotX === null || isNaN(rotX)) {
-      if (payload.rotX !== undefined && payload.rotX !== null) {
-        rotX = Number(payload.rotX);
-        rotY = Number(payload.rotY);
-        rotZ = Number(payload.rotZ);
-        rotW = Number(payload.rotW ?? 1);
-      }
+      const rx = payload.rotX ?? payload.rx ?? payload.RotX;
+      const ry = payload.rotY ?? payload.ry ?? payload.RotY;
+      const rz = payload.rotZ ?? payload.rz ?? payload.RotZ;
+      const rw = payload.rotW ?? payload.rw ?? payload.RotW ?? 1;
+      if (rx !== undefined && rx !== null) rotX = Number(rx);
+      if (ry !== undefined && ry !== null) rotY = Number(ry);
+      if (rz !== undefined && rz !== null) rotZ = Number(rz);
+      if (rw !== undefined && rw !== null) rotW = Number(rw);
     }
 
     if (posX === null || isNaN(posX) || posY === null || isNaN(posY) || posZ === null || isNaN(posZ)) {
-      return;
+      if (player.transform?.position) {
+        posX = player.transform.position.x;
+        posY = player.transform.position.y;
+        posZ = player.transform.position.z;
+      } else {
+        return;
+      }
     }
     if (rotX === null || isNaN(rotX) || rotY === null || isNaN(rotY) || rotZ === null || isNaN(rotZ)) {
-      rotX = 0; rotY = 0; rotZ = 0; rotW = 1;
+      if (player.transform?.rotation) {
+        rotX = player.transform.rotation.x;
+        rotY = player.transform.rotation.y;
+        rotZ = player.transform.rotation.z;
+        rotW = player.transform.rotation.w ?? 1;
+      } else {
+        rotX = 0; rotY = 0; rotZ = 0; rotW = 1;
+      }
     }
 
     const ctrl = payload.controls || {};
@@ -1323,13 +1350,12 @@ io.on('connection', (socket) => {
     const brake = isTruthy(payload.brake ?? payload.brakeLight ?? payload.stopLight ?? (brakeCtrl > 0));
     const reverse = isTruthy(payload.reverse ?? payload.reverseLight ?? payload.reversing);
 
-    if (payload.vehicleId) player.vehicleId = cleanText(payload.vehicleId, 80);
-    if (payload.skinId) player.skinId = cleanText(payload.skinId, 80);
-    if (payload.skinPath) player.skinPath = cleanText(payload.skinPath, 160);
-    if (payload.skinTex) {
-      const st = cleanText(payload.skinTex, 160);
-      if (st) player.skinPath = st;
+    if (payload.vehicleId || payload.busId) player.vehicleId = cleanText(payload.vehicleId || payload.busId, 80);
+    const skinVal = payload.skinPath || payload.skinTex || payload.skin || payload.skinName || payload.skin_path || payload.skin_tex || payload.skinFile;
+    if (skinVal) {
+      player.skinPath = cleanText(skinVal, 160);
     }
+    if (payload.skinId) player.skinId = cleanText(payload.skinId, 80);
     if (payload.pseudo || payload.username || payload.name) {
       const pName = cleanText(payload.pseudo || payload.username || payload.name, 24);
       if (pName) {
@@ -1363,7 +1389,9 @@ io.on('connection', (socket) => {
     };
     player.transform = transform;
 
-    socket.to(room.id).emit('vehicleUpdate', {
+    const outgoingBusInfo = cleanedBusInfo || player.busInfo;
+    const updatePacket = {
+      ...(typeof payload === 'object' ? payload : {}),
       roomId: room.id,
       id: socket.id,
       socketId: socket.id,
@@ -1375,7 +1403,9 @@ io.on('connection', (socket) => {
       skinId: player.skinId,
       skinPath: player.skinPath,
       skinTex: player.skinPath || player.skinId,
-      ...(cleanedBusInfo ? { busInfo: cleanedBusInfo } : {}),
+      skin: player.skinPath,
+      skinName: player.skinPath,
+      ...(outgoingBusInfo ? { busInfo: outgoingBusInfo } : {}),
       x: posX, y: posY, z: posZ,
       rotX, rotY, rotZ, rotW,
       position: transform.position,
@@ -1390,7 +1420,9 @@ io.on('connection', (socket) => {
       reverse, reverseLight: reverse, marchaRe: reverse, reversing: reverse,
       showNameTag, showVoiceIcon, isTalking,
       transform,
-    });
+    };
+
+    socket.to(room.id).emit('vehicleUpdate', updatePacket);
   });
 
   socket.on('disconnect', (reason) => {
