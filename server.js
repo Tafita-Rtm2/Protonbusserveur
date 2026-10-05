@@ -197,10 +197,15 @@ function checkVehicleUpdateRateLimit(socket) {
     return true;
   }
   history.count += 1;
-  if (history.count > 35) {
+  if (history.count > 80) {
     return false;
   }
   return true;
+}
+
+function isTruthy(v) {
+  if (v === true || v === 1 || v === '1' || v === 'true' || v === 'True' || v === 'TRUE') return true;
+  return false;
 }
 
 function validatePayloadSize(payload, maxKeys = 30, maxStringLen = 500) {
@@ -1234,13 +1239,13 @@ io.on('connection', (socket) => {
     }
     if (!payload || typeof payload !== 'object') return;
 
-    if (!validatePayloadSize(payload, 50, 500)) {
+    if (!validatePayloadSize(payload, 120, 2000)) {
       logSecuThrottled(`vUpd_size_${socket.id}`, `Socket ${socket.id} - Payload vehicleUpdate invalide ou trop grand.`);
       return;
     }
 
     if (!checkVehicleUpdateRateLimit(socket)) {
-      logSecuThrottled(`vUpd_rate_${socket.id}`, `Socket ${socket.id} - Rate limit vehicleUpdate dépassé (>35msg/s).`);
+      logSecuThrottled(`vUpd_rate_${socket.id}`, `Socket ${socket.id} - Rate limit vehicleUpdate dépassé (>80msg/s).`);
       return;
     }
 
@@ -1253,7 +1258,6 @@ io.on('connection', (socket) => {
     }
 
     const now = Date.now();
-    if (now - player.lastUpdateTs < 10) return; // allow 60Hz tick or network jitter
     player.lastUpdateTs = now;
 
     let posX = null, posY = null, posZ = null;
@@ -1312,12 +1316,12 @@ io.on('connection', (socket) => {
     const brakeCtrl = Number(ctrl.brake ?? payload.brake) || 0;
     const handbrake = Number(ctrl.handbrake ?? payload.handbrake) || 0;
 
-    const headlight = Boolean(payload.headlight ?? false);
-    const turnLeft = Boolean(payload.turnLeft ?? false);
-    const turnRight = Boolean(payload.turnRight ?? false);
-    const hazard = Boolean(payload.hazard ?? false);
-    const brake = Boolean(payload.brake ?? (brakeCtrl > 0));
-    const reverse = Boolean(payload.reverse ?? false);
+    const headlight = isTruthy(payload.headlight ?? payload.headLight ?? payload.lights);
+    const turnLeft = isTruthy(payload.turnLeft ?? payload.turn_left ?? payload.indicatorLeft);
+    const turnRight = isTruthy(payload.turnRight ?? payload.turn_right ?? payload.indicatorRight);
+    const hazard = isTruthy(payload.hazard ?? payload.hazards ?? payload.hazardLight);
+    const brake = isTruthy(payload.brake ?? payload.brakeLight ?? payload.stopLight ?? (brakeCtrl > 0));
+    const reverse = isTruthy(payload.reverse ?? payload.reverseLight ?? payload.reversing);
 
     if (payload.vehicleId) player.vehicleId = cleanText(payload.vehicleId, 80);
     if (payload.skinId) player.skinId = cleanText(payload.skinId, 80);
@@ -1377,7 +1381,12 @@ io.on('connection', (socket) => {
       rotation: transform.rotation,
       controls: transform.controls,
       steerInput, throttle, brake: brakeCtrl, handbrake,
-      headlight, turnLeft, turnRight, hazard, brake, reverse,
+      headlight, headLight: headlight, lights: headlight,
+      turnLeft, turn_left: turnLeft,
+      turnRight, turn_right: turnRight,
+      hazard, hazards: hazard,
+      brake, brakeLight: brake, stopLight: brake,
+      reverse, reverseLight: reverse,
       showNameTag, showVoiceIcon, isTalking,
       transform,
     });
