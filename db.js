@@ -39,14 +39,13 @@ function loadJson() {
 }
 
 function saveJson() {
+  if (mode !== 'json') return;
   try {
     const dir = path.dirname(JSON_FILE);
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(JSON_FILE, JSON.stringify([...mem.values()], null, 2), 'utf8');
   } catch (err) {
-    if (mode === 'json') {
-      console.error('[DB] Écriture keys.json impossible:', err.message);
-    }
+    console.error('[DB] Écriture keys.json impossible:', err.message);
   }
 }
 
@@ -110,33 +109,12 @@ async function initSupabase() {
     auth: { persistSession: false, autoRefreshToken: false },
   });
 
-  loadJson();
-
-  const { data, error } = await sb.from('keys').select('*');
+  const { data, error } = await sb.from('keys').select('id');
   if (error) {
     const missing = error.code === 'PGRST205' || /does not exist|schema cache/i.test(error.message || '');
     throw new Error(missing
       ? 'table "keys" absente : exécute supabase/schema.sql dans Supabase → SQL Editor'
       : (error.message || error.code || 'erreur inconnue'));
-  }
-
-  if (data && data.length > 0) {
-    for (const r of data) {
-      const k = rowToKey(r);
-      mem.set(k.keyCode, k);
-    }
-    saveJson();
-  } else if (mem.size > 0) {
-    for (const item of mem.values()) {
-      await sb.from('keys').insert({
-        id: item.id,
-        key_code: item.keyCode,
-        player_name: item.playerName,
-        expires_at: item.expiresAt,
-        created_at: item.createdAt,
-      });
-    }
-    console.log(`[DB] ${mem.size} clé(s) importée(s) dans Supabase.`);
   }
 }
 
@@ -201,9 +179,6 @@ async function createKey(item) {
     createdAt: item.createdAt || Date.now(),
   };
 
-  mem.set(k, keyObj);
-  saveJson();
-
   if (mode === 'supabase') {
     const { error } = await sb.from('keys').insert({
       id: keyObj.id,
@@ -215,7 +190,9 @@ async function createKey(item) {
     if (!error) return { ok: true, key: keyObj };
     if (error.code === '23505') return { ok: false, conflict: true };
     console.error('[DB] Erreur création Supabase:', error.message);
+    return { ok: false, error: error.message };
   }
+
   if (mode === 'postgres') {
     try {
       await pool.query(
@@ -226,13 +203,28 @@ async function createKey(item) {
     } catch (err) {
       if (err.code === '23505') return { ok: false, conflict: true };
       console.error('[DB] Erreur création PostgreSQL:', err.message);
+      return { ok: false, error: err.message };
     }
   }
 
+  mem.set(k, keyObj);
+  saveJson();
   return { ok: true, key: keyObj };
 }
 
 async function deleteKey(id) {
+  if (mode === 'supabase') {
+    try {
+      await sb.from('keys').delete().eq('id', id);
+    } catch (e) {}
+    return { ok: true };
+  }
+  if (mode === 'postgres') {
+    try {
+      await pool.query('DELETE FROM keys WHERE id = $1', [id]);
+    } catch (e) {}
+    return { ok: true };
+  }
   for (const [k, v] of mem.entries()) {
     if (v.id === id) {
       mem.delete(k);
@@ -240,17 +232,6 @@ async function deleteKey(id) {
     }
   }
   saveJson();
-
-  if (mode === 'supabase') {
-    try {
-      await sb.from('keys').delete().eq('id', id);
-    } catch (e) {}
-  }
-  if (mode === 'postgres') {
-    try {
-      await pool.query('DELETE FROM keys WHERE id = $1', [id]);
-    } catch (e) {}
-  }
   return { ok: true };
 }
 
@@ -259,23 +240,21 @@ async function getAllKeys() {
     try {
       const { data, error } = await sb.from('keys').select('*').order('created_at', { ascending: false });
       if (!error && data) {
-        const list = data.map(rowToKey);
-        list.forEach((k) => mem.set(k.keyCode, k));
-        saveJson();
-        return list;
+        return data.map(rowToKey);
       }
-    } catch (e) {}
+      return [];
+    } catch (e) {
+      return [];
+    }
   }
   if (mode === 'postgres') {
     try {
       const { rows } = await pool.query('SELECT * FROM keys ORDER BY created_at DESC');
-      if (rows) {
-        const list = rows.map(rowToKey);
-        list.forEach((k) => mem.set(k.keyCode, k));
-        saveJson();
-        return list;
-      }
-    } catch (e) {}
+      if (rows) return rows.map(rowToKey);
+      return [];
+    } catch (e) {
+      return [];
+    }
   }
   return [...mem.values()].sort((a, b) => b.createdAt - a.createdAt);
 }
