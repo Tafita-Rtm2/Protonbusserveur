@@ -773,7 +773,7 @@ function emitBans(room) {
   });
 }
 
-function joinRoomInternal(sock, roomId, { password, mapId, busId, username, pseudo, vehicleId, skinId, skinPath, busInfo }) {
+function joinRoomInternal(sock, roomId, { password, mapId, busId, username, pseudo, vehicleId, skinId, skinPath, skinTex, busInfo }) {
   const room = rooms.get(roomId);
   if (!room) return { ok: false, error: 'Room introuvable.' };
 
@@ -798,7 +798,7 @@ function joinRoomInternal(sock, roomId, { password, mapId, busId, username, pseu
   }
 
   const finalSkinId = String(skinId || 'default');
-  const finalSkinPath = cleanText(skinPath || skinId || 'default', 160);
+  const finalSkinPath = cleanText(skinPath || skinTex || skinId || 'default', 160);
 
   const player = {
     socketId: sock.id,
@@ -833,9 +833,11 @@ function joinRoomInternal(sock, roomId, { password, mapId, busId, username, pseu
     userId: player.userId,
     username: player.username,
     pseudo: player.pseudo,
+    name: player.pseudo,
     vehicleId: player.vehicleId,
     skinId: player.skinId,
     skinPath: player.skinPath,
+    skinTex: player.skinPath || player.skinId,
     busInfo: player.busInfo,
     headlight: player.headlight,
     turnLeft: player.turnLeft,
@@ -857,11 +859,20 @@ function joinRoomInternal(sock, roomId, { password, mapId, busId, username, pseu
         userId: p.userId,
         username: p.username,
         pseudo: p.pseudo,
+        name: p.pseudo,
         vehicleId: p.vehicleId,
         skinId: p.skinId,
         skinPath: p.skinPath,
+        skinTex: p.skinPath || p.skinId,
         busInfo: p.busInfo,
         transform: p.transform,
+        x: p.transform?.position?.x ?? 0,
+        y: p.transform?.position?.y ?? 0,
+        z: p.transform?.position?.z ?? 0,
+        rotX: p.transform?.rotation?.x ?? 0,
+        rotY: p.transform?.rotation?.y ?? 0,
+        rotZ: p.transform?.rotation?.z ?? 0,
+        rotW: p.transform?.rotation?.w ?? 1,
         headlight: p.headlight,
         turnLeft: p.turnLeft,
         turnRight: p.turnRight,
@@ -1261,6 +1272,17 @@ io.on('connection', (socket) => {
     if (payload.vehicleId) player.vehicleId = cleanText(payload.vehicleId, 80);
     if (payload.skinId) player.skinId = cleanText(payload.skinId, 80);
     if (payload.skinPath) player.skinPath = cleanText(payload.skinPath, 160);
+    if (payload.skinTex) {
+      const st = cleanText(payload.skinTex, 160);
+      if (st) player.skinPath = st;
+    }
+    if (payload.pseudo || payload.username || payload.name) {
+      const pName = cleanText(payload.pseudo || payload.username || payload.name, 24);
+      if (pName) {
+        player.pseudo = pName;
+        player.username = pName;
+      }
+    }
     const cleanedBusInfo = cleanBusInfo(payload.busInfo);
     if (cleanedBusInfo) player.busInfo = cleanedBusInfo;
 
@@ -1287,16 +1309,28 @@ io.on('connection', (socket) => {
     };
     player.transform = transform;
 
+    const x = transform.position.x;
+    const y = transform.position.y;
+    const z = transform.position.z;
+    const rotX = transform.rotation.x;
+    const rotY = transform.rotation.y;
+    const rotZ = transform.rotation.z;
+    const rotW = transform.rotation.w;
+
     socket.to(room.id).volatile.emit('vehicleUpdate', {
       roomId: room.id,
       socketId: socket.id,
       userId: player.userId,
       username: player.username,
       pseudo: player.pseudo,
+      name: player.pseudo,
       vehicleId: player.vehicleId,
       skinId: player.skinId,
       skinPath: player.skinPath,
+      skinTex: player.skinPath || player.skinId,
       ...(cleanedBusInfo ? { busInfo: cleanedBusInfo } : {}),
+      x, y, z,
+      rotX, rotY, rotZ, rotW,
       position: transform.position,
       rotation: transform.rotation,
       controls: transform.controls,
