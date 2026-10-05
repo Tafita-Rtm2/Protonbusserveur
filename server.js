@@ -1365,6 +1365,7 @@ io.on('connection', (socket) => {
 
     socket.to(room.id).emit('vehicleUpdate', {
       roomId: room.id,
+      id: socket.id,
       socketId: socket.id,
       userId: player.userId,
       username: player.username,
@@ -1381,12 +1382,12 @@ io.on('connection', (socket) => {
       rotation: transform.rotation,
       controls: transform.controls,
       steerInput, throttle, brake: brakeCtrl, handbrake,
-      headlight, headLight: headlight, lights: headlight,
-      turnLeft, turn_left: turnLeft,
-      turnRight, turn_right: turnRight,
-      hazard, hazards: hazard,
-      brake, brakeLight: brake, stopLight: brake,
-      reverse, reverseLight: reverse,
+      headlight, headLight: headlight, lights: headlight, luzes: headlight,
+      turnLeft, turn_left: turnLeft, setaEsquerda: turnLeft, indicatorLeft: turnLeft,
+      turnRight, turn_right: turnRight, setaDireita: turnRight, indicatorRight: turnRight,
+      hazard, hazards: hazard, piscaAlerta: hazard, hazardLight: hazard,
+      brake, brakeLight: brake, stopLight: brake, freio: brake,
+      reverse, reverseLight: reverse, marchaRe: reverse, reversing: reverse,
       showNameTag, showVoiceIcon, isTalking,
       transform,
     });
