@@ -1,0 +1,110 @@
+--- /mnt/user-data/uploads/main_cpp.txt	2026-10-06 07:14:46.342657000 +0000
++++ main.cpp	2026-10-06 07:17:17.097609482 +0000
+@@ -421,6 +421,7 @@
+     void* remoteTransform = nullptr;
+     void* nameplateCanvas = nullptr;
+     void* nameplateText = nullptr;
++    std::string nameplateShownText; // dernier texte envoyé au TextMesh (pour le mettre à jour si le pseudo change)
+     void* voiceIconObj = nullptr;
+     // Clone du VRAI bus (au lieu du cube) : décalage éventuel entre la racine clonée
+     // et le Rigidbody dont on synchronise la position.
+@@ -621,6 +622,12 @@
+     return defaultValue;
+ }
+ 
++// Pseudo propre : ignore "null"/"undefined" que certains serveurs envoient quand le nom est absent.
++static std::string cleanPseudoValue(std::string p) {
++    if (p == "null" || p == "undefined" || p == "NaN") return "";
++    return p;
++}
++
+ static std::string extractPlayerId(const std::string &json) {
+     std::string id = extractJsonString(json, "socketId");
+     if (id.empty()) id = extractJsonString(json, "playerId");
+@@ -2045,6 +2052,9 @@
+             oldGO = it->second.remoteGameObject;
+             it->second.remoteGameObject = cGO;
+             it->second.remoteTransform = cT;
++            it->second.nameplateCanvas = nullptr;   // FIX pseudo : l'ancien nametag est détruit avec l'ancien bus
++            it->second.nameplateText = nullptr;
++            it->second.nameplateShownText.clear();
+             it->second.isClone = true;
+             it->second.hasRootOffset = hasOff;
+             it->second.rootOffLocal = offL;
+@@ -2376,6 +2386,9 @@
+         if (it != g_remotePlayers.end()) {
+             it->second.remoteGameObject = cGO;
+             it->second.remoteTransform = cT;
++            it->second.nameplateCanvas = nullptr;   // FIX pseudo : l'ancien nametag est détruit avec l'ancien bus
++            it->second.nameplateText = nullptr;
++            it->second.nameplateShownText.clear();
+             it->second.isClone = true;
+             it->second.hasRootOffset = hasOff;
+             it->second.rootOffLocal = offL;
+@@ -2443,6 +2456,7 @@
+             if (!playerId.empty()) {
+                 std::string pseudo = extractJsonString(msg, "pseudo");
+                 if (pseudo.empty()) pseudo = extractJsonString(msg, "username");
++                pseudo = cleanPseudoValue(pseudo);
+ 
+                 std::string vehicleId = extractJsonString(msg, "vehicleId");
+                 if (vehicleId.empty()) vehicleId = extractJsonString(msg, "busId");
+@@ -2535,6 +2549,7 @@
+ 
+             std::string pseudo = extractJsonString(msg, "pseudo");
+             if (pseudo.empty()) pseudo = extractJsonString(msg, "username");
++                pseudo = cleanPseudoValue(pseudo);
+ 
+             std::string vehicleId = extractJsonString(msg, "vehicleId");
+             if (vehicleId.empty()) vehicleId = extractJsonString(msg, "busId");
+@@ -2578,6 +2593,7 @@
+                     if (!pId.empty()) {
+                         std::string pName = extractJsonString(pObj, "pseudo");
+                         if (pName.empty()) pName = extractJsonString(pObj, "username");
++                        pName = cleanPseudoValue(pName);
+ 
+                         std::string pVehicle = extractJsonString(pObj, "vehicleId");
+                         if (pVehicle.empty()) pVehicle = extractJsonString(pObj, "busId");
+@@ -3296,6 +3312,18 @@
+     }
+ }
+ 
++// Met à jour le texte du nametag si le pseudo a changé (ou n'était pas encore connu à la création).
++static void refreshNametagText(InternalRemotePlayer& player) {
++    if (!player.nameplateText || !g_method_TextMesh_set_text || !il2cpp_runtime_invoke_fn || !il2cpp_string_new_fn) return;
++    const std::string wanted = player.pseudo.empty() ? std::string("Joueur") : player.pseudo;
++    if (wanted == player.nameplateShownText) return;
++    void* txtStr = il2cpp_string_new_fn(wanted.c_str());
++    void* args[1] = { txtStr };
++    void* exc = nullptr;
++    il2cpp_runtime_invoke_fn(g_method_TextMesh_set_text, player.nameplateText, args, &exc);
++    if (!exc) player.nameplateShownText = wanted;
++}
++
+ static void createNametagForRemotePlayer(InternalRemotePlayer& player) {
+     if (!player.remoteGameObject || player.nameplateCanvas || !resolveNametagApis()) return;
+ 
+@@ -3368,10 +3396,12 @@
+ 
+     if (textMeshComp && il2cpp_runtime_invoke_fn && il2cpp_string_new_fn) {
+         if (g_method_TextMesh_set_text) {
+-            void* txtStr = il2cpp_string_new_fn(player.pseudo.c_str());
++            const std::string initialText = player.pseudo.empty() ? std::string("Joueur") : player.pseudo;
++            void* txtStr = il2cpp_string_new_fn(initialText.c_str());
+             void* args[1] = { txtStr };
+             void* exc = nullptr;
+             il2cpp_runtime_invoke_fn(g_method_TextMesh_set_text, textMeshComp, args, &exc);
++            if (!exc) player.nameplateShownText = initialText;
+         }
+ 
+         if (g_method_TextMesh_set_fontSize) {
+@@ -3704,6 +3734,9 @@
+                     if (!player.nameplateCanvas) {
+                         createNametagForRemotePlayer(player);
+                     }
++                    if (player.nameplateCanvas) {
++                        refreshNametagText(player);   // FIX pseudo : met à jour le nom s'il change
++                    }
+                     if (player.nameplateCanvas && mainCamTransform) {
+                         void* tagT = fn_GameObject_GetTransform(player.nameplateCanvas);
+                         if (tagT) {

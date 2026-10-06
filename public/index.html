@@ -554,11 +554,16 @@
 
   // --- Gestion du pseudo dans LocalStorage ---
   const pseudoInput = document.getElementById('playerPseudo');
-  const savedPseudo = localStorage.getItem('proton_bus_pseudo') || 'Chauffeur_' + Math.floor(1000 + Math.random() * 9000);
+  pseudoInput.setAttribute('maxlength', '20');
+  // Pseudo "sûr" pour le jeu : le mod coupe le nom au premier " , { } [ ] => on les retire côté web aussi.
+  function sanitizePseudo(v) {
+    return String(v || '').replace(/[\u0000-\u001f\u007f"\\,{}\[\]<>]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 20).trim();
+  }
+  const savedPseudo = sanitizePseudo(localStorage.getItem('proton_bus_pseudo')) || 'Chauffeur_' + Math.floor(1000 + Math.random() * 9000);
   pseudoInput.value = savedPseudo;
 
   pseudoInput.addEventListener('change', () => {
-    const val = pseudoInput.value.trim() || ('Chauffeur_' + Math.floor(1000 + Math.random() * 9000));
+    const val = sanitizePseudo(pseudoInput.value) || ('Chauffeur_' + Math.floor(1000 + Math.random() * 9000));
     pseudoInput.value = val;
     localStorage.setItem('proton_bus_pseudo', val);
   });
@@ -768,8 +773,12 @@
   }
 
   function getCurrentPseudo() {
-    const p = pseudoInput.value.trim();
-    if (p) return p;
+    const p = sanitizePseudo(pseudoInput.value);
+    if (p) {
+      if (pseudoInput.value !== p) pseudoInput.value = p;
+      try { localStorage.setItem('proton_bus_pseudo', p); } catch (e) {}
+      return p;
+    }
     const fallback = 'Chauffeur_' + Math.floor(1000 + Math.random() * 9000);
     pseudoInput.value = fallback;
     localStorage.setItem('proton_bus_pseudo', fallback);

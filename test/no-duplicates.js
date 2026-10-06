@@ -39,6 +39,17 @@ const count = async (s, id) => (await emit(s, 'getRooms')).rooms?.find((x) => x.
     const carl = await conn();
     await emit(carl, 'joinRoom', { roomId: r.room.id, pseudo: 'Carl' });
     ok((await count(carl, r.room.id)) === 3, 'Carl (autre pseudo) => 3 joueurs');
+
+    console.log('\n--- Pseudo lisible par le mod (vehicleUpdate) ---');
+    const dave = await conn();
+    const dj = await emit(dave, 'joinRoom', { roomId: r.room.id, pseudo: '[FR] Jean, Pierre}' });
+    ok(dj.ok, 'pseudo avec caractères spéciaux accepté');
+    const got = new Promise((res) => carl.once('vehicleUpdate', res));
+    await wait(80);
+    dave.emit('vehicleUpdate', { position: { x: 1, y: 2, z: 3 }, rotation: { x: 0, y: 0, z: 0, w: 1 }, vehicleId: 'bus_default' });
+    const vu = await Promise.race([got, wait(1500).then(() => null)]);
+    ok(vu && vu.pseudo === 'FR Jean Pierre' && vu.username === 'FR Jean Pierre', 'vehicleUpdate relayé avec pseudo nettoyé : ' + (vu && vu.pseudo));
+    ok(vu && !/[",}\]\[]/.test(vu.pseudo), 'aucun caractère qui casse le parseur du mod');
   } catch (e) { ok(false, 'exception ' + e.message); }
   srv.kill();
   console.log(`\n${passed} OK, ${failed} échec(s)`);

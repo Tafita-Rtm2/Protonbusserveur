@@ -773,6 +773,20 @@ function emitBans(room) {
   });
 }
 
+// Nom "sûr" pour le jeu : le mod C++ lit le JSON avec un parseur simplifié qui coupe le nom au premier
+// guillemet, virgule, accolade ou crochet. On retire ces caractères (et les contrôles) pour que le pseudo
+// affiché au-dessus du bus soit toujours complet.
+function wireName(name, fallback = 'Joueur') {
+  const cleaned = String(name == null ? '' : name)
+    .replace(/[\u0000-\u001f\u007f"\\,{}\[\]<>]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 24)
+    .trim();
+  if (!cleaned || /^(null|undefined|nan)$/i.test(cleaned)) return fallback;
+  return cleaned;
+}
+
 // ------------------------------------------------------------------
 // Anti-doublons : une même personne ne doit compter qu'UNE fois dans un salon.
 // Cause du bug "2/10" (création) et "4/10" (clic sur Rejoindre) : l'interface web
@@ -827,7 +841,7 @@ function joinRoomInternal(sock, roomId, { password, mapId, busId, username, pseu
   const room = rooms.get(roomId);
   if (!room) return { ok: false, error: 'Room introuvable.' };
 
-  const finalUsername = cleanText(sock.user?.username || sock.user?.pseudo || username || pseudo || `Joueur_${sock.id.slice(0, 5)}`, 24);
+  const finalUsername = wireName(sock.user?.username || sock.user?.pseudo || username || pseudo, `Joueur_${sock.id.slice(0, 5)}`);
   const userId = sock.user?.id || genId('user');
 
   if (room.bans.has(`u:${userId}`) || room.bans.has(`n:${userKey(finalUsername)}`)) {
