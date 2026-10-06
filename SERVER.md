@@ -95,3 +95,18 @@ function handlePlayerLeave(socket) {
     }
 }
 ```
+
+---
+
+## 4. Anti-doublons de joueurs (correctif compteur 2/10, 4/10)
+
+**Symptôme** : à la création d'un salon le compteur affichait 2/10, et un clic sur « Rejoindre » pouvait donner 4/10.
+**Cause** : le jeu ouvre parfois une 2e connexion socket (ou se reconnecte) alors que l'ancienne connexion « fantôme » est encore dans le salon ; chaque socket était compté comme un joueur distinct.
+
+**Correctifs dans `server.js`** :
+- `joinRoom` est idempotent : un joueur déjà présent n'est pas recompté ni ré-annoncé (le `roomState` est simplement renvoyé).
+- Une nouvelle connexion d'un même joueur (même clé d'activation, même compte, même `deviceId`/`clientId`, ou même pseudo + même IP pour les invités) remplace l'ancienne session (`duplicateSession` envoyé à l'ancienne, `playerLeft` diffusé). Si l'ancienne session était l'hôte, l'hôte est transféré à la nouvelle (`roomHostChanged`), le salon n'est pas supprimé.
+- Verrou par socket sur `createRoom`/`joinRoom` contre les doubles clics (réponse `code: "BUSY"`).
+- Balayage toutes les 15 s des sockets fantômes + migration d'hôte automatique.
+- `maxPlayers` par défaut passé de 10 à 20.
+- Champ optionnel `deviceId` (ou `clientId`) accepté dans `createRoom`/`joinRoom` pour une identification fiable côté APK.

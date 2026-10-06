@@ -25,7 +25,7 @@ const db = require('./db');
 const PORT = process.env.PORT || 7860;
 const TICK_RATE = 30;
 const MIN_TICK_INTERVAL_MS = 1000 / TICK_RATE;
-const DEFAULT_MAX_PLAYERS = 10;
+const DEFAULT_MAX_PLAYERS = 20;
 const JWT_EXPIRES_IN = '7d';
 
 const ADMIN_CODE = process.env.ADMIN_CODE;
@@ -778,87 +778,46 @@ function emitBans(room) {
   });
 }
 
-function joinRoomInternal(sock, roomId, { password, mapId, busId, username, pseudo, vehicleId, skinId, skinPath, skinTex, skin, skinName, busInfo }) {
-  const room = rooms.get(roomId);
-  if (!room) return { ok: false, error: 'Room introuvable.' };
 
-  const finalUsername = cleanText(sock.user?.username || sock.user?.pseudo || username || pseudo || `Joueur_${sock.id.slice(0, 5)}`, 24);
-  const userId = sock.user?.id || genId('user');
+// ------------------------------------------------------------------
+// Anti-doublons : un même joueur ne doit JAMAIS compter 2 fois dans un salon
+// (cause du bug "2/10" à la création et "4/10" après un clic sur Rejoindre :
+// le jeu ouvre une 2e connexion socket ou se reconnecte pendant que l'ancienne
+// connexion "fantôme" est encore dans le salon).
+// ------------------------------------------------------------------
+function sameIdentity(oldSock, newSock, oldPlayer, newPlayer) {
+  if (!oldPlayer || oldPlayer.socketId === newPlayer.socketId) return false;
+  // 1) même clé d'activation
+  const oldKey = oldSock?.data?.keyCode;
+  const newKey = newSock?.data?.keyCode;
+  if (oldKey && newKey && oldKey === newKey) return true;
+  // 2) même compte (userId stable, hors invités)
+  if (oldPlayer.userId && newPlayer.userId && !String(oldPlayer.userId).startsWith('user_') && oldPlayer.userId === newPlayer.userId) return true;
+  // 3) même identifiant d'appareil fourni par le client
+  if (oldPlayer.deviceId && newPlayer.deviceId && oldPlayer.deviceId === newPlayer.deviceId) return true;
+  // 4) invité : même pseudo + même IP = même appareil
+  const oldIp = oldSock?.handshake?.address;
+  const newIp = newSock?.handshake?.address;
+  if (oldIp && newIp && oldIp === newIp && userKey(oldPlayer.username) === userKey(newPlayer.username)) return true;
+  return false;
+}
 
-  if (room.bans.has(`u:${userId}`) || room.bans.has(`n:${userKey(finalUsername)}`)) {
-    return { ok: false, error: 'Tu as été banni de cette room.', code: 'BANNED' };
+// Retire un joueur périmé du salon SANS supprimer le salon et SANS casser l'hôte.
+function evictStalePlayer(room, staleId) {
+  const stale = room.players.get(staleId);
+  if (!stale) return;
+  room.players.delete(staleId);
+  const staleSock = io.sockets.sockets.get(staleId);
+  if (staleSock) {
+    if (staleSock.data.roomId === room.id) staleSock.data.roomId = null;
+    staleSock.leave(room.id);
+    staleSock.leave(webRoom(room));
+    staleSock.emit('duplicateSession', { roomId: room.id, reason: 'Session remplacée par une nouvelle connexion.' });
   }
-  if (room.players.size >= room.maxPlayers) return { ok: false, error: 'Room pleine.' };
+  io.to(room.id).emit('playerLeft', { socketId: staleId, userId: stale.userId, username: stale.username || stale.pseudo });
+}
 
-  if (room.passwordHash) {
-    const providedOk = password && bcrypt.compareSync(String(password), room.passwordHash);
-    if (!providedOk) return { ok: false, error: 'Mot de passe incorrect.' };
-  }
-
-  if (mapId && String(mapId) !== room.mapId) {
-    return { ok: false, error: `Incompatibilité de carte : la room exige mapId="${room.mapId}".`, code: 'MAP_MISMATCH' };
-  }
-  if (busId && String(busId) !== room.busId) {
-    return { ok: false, error: `Incompatibilité de bus : la room exige busId="${room.busId}".`, code: 'BUS_MISMATCH' };
-  }
-
-  const finalSkinId = String(skinId || 'default');
-  const rawSkinPath = skinPath || skinTex || skin || skinName || skinId || 'default';
-  const finalSkinPath = cleanText(rawSkinPath, 160);
-
-  const player = {
-    socketId: sock.id,
-    userId,
-    username: finalUsername,
-    pseudo: finalUsername,
-    vehicleId: String(vehicleId || busId || 'bus_default'),
-    skinId: finalSkinId,
-    skinPath: finalSkinPath,
-    busInfo: cleanBusInfo(busInfo),
-    transform: null,
-    headlight: false,
-    turnLeft: false,
-    turnRight: false,
-    hazard: false,
-    brake: false,
-    reverse: false,
-    showNameTag: true,
-    showVoiceIcon: false,
-    isTalking: false,
-    lastUpdateTs: 0,
-    inVoice: false,
-    muted: false,
-  };
-  room.players.set(sock.id, player);
-  sock.join(room.id);
-  if (sock.data.web) sock.join(webRoom(room));
-  sock.data.roomId = room.id;
-
-  sock.to(room.id).emit('playerJoined', {
-    id: sock.id,
-    socketId: sock.id,
-    userId: player.userId,
-    username: player.username,
-    pseudo: player.pseudo,
-    name: player.pseudo,
-    vehicleId: player.vehicleId,
-    skinId: player.skinId,
-    skinPath: player.skinPath,
-    skinTex: player.skinPath || player.skinId,
-    skin: player.skinPath,
-    skinName: player.skinPath,
-    busInfo: player.busInfo,
-    headlight: player.headlight,
-    turnLeft: player.turnLeft,
-    turnRight: player.turnRight,
-    hazard: player.hazard,
-    brake: player.brake,
-    reverse: player.reverse,
-    showNameTag: player.showNameTag,
-    showVoiceIcon: player.showVoiceIcon,
-    isTalking: player.isTalking,
-  });
-
+function sendRoomState(sock, room) {
   sock.emit('roomState', {
     room: publicRoom(room),
     players: Array.from(room.players.values())
@@ -898,6 +857,111 @@ function joinRoomInternal(sock, roomId, { password, mapId, busId, username, pseu
         isTalking: p.isTalking,
       })),
   });
+
+}
+
+function joinRoomInternal(sock, roomId, { password, mapId, busId, username, pseudo, vehicleId, skinId, skinPath, skinTex, skin, skinName, busInfo, deviceId, clientId }) {
+  const room = rooms.get(roomId);
+  if (!room) return { ok: false, error: 'Room introuvable.' };
+
+  const finalUsername = cleanText(sock.user?.username || sock.user?.pseudo || username || pseudo || `Joueur_${sock.id.slice(0, 5)}`, 24);
+  const userId = sock.user?.id || genId('user');
+
+  if (room.bans.has(`u:${userId}`) || room.bans.has(`n:${userKey(finalUsername)}`)) {
+    return { ok: false, error: 'Tu as été banni de cette room.', code: 'BANNED' };
+  }
+  // Déjà dans ce salon (double clic, double emit) : on répond OK sans recompter ni ré-annoncer.
+  if (room.players.has(sock.id)) {
+    sendRoomState(sock, room);
+    return { ok: true, room: publicRoom(room), alreadyJoined: true };
+  }
+
+  const probe = { socketId: sock.id, userId, username: finalUsername, deviceId: String(deviceId || clientId || '').slice(0, 80) || null };
+  const staleIds = [];
+  for (const [sid, p] of room.players) {
+    if (sameIdentity(io.sockets.sockets.get(sid), sock, p, probe)) staleIds.push(sid);
+  }
+  const hadHostStale = staleIds.includes(room.hostSocketId || room.hostId);
+  for (const sid of staleIds) evictStalePlayer(room, sid);
+
+  if (room.players.size >= room.maxPlayers) return { ok: false, error: 'Room pleine.' };
+
+  if (room.passwordHash) {
+    const providedOk = password && bcrypt.compareSync(String(password), room.passwordHash);
+    if (!providedOk) return { ok: false, error: 'Mot de passe incorrect.' };
+  }
+
+  if (mapId && String(mapId) !== room.mapId) {
+    return { ok: false, error: `Incompatibilité de carte : la room exige mapId="${room.mapId}".`, code: 'MAP_MISMATCH' };
+  }
+  if (busId && String(busId) !== room.busId) {
+    return { ok: false, error: `Incompatibilité de bus : la room exige busId="${room.busId}".`, code: 'BUS_MISMATCH' };
+  }
+
+  const finalSkinId = String(skinId || 'default');
+  const rawSkinPath = skinPath || skinTex || skin || skinName || skinId || 'default';
+  const finalSkinPath = cleanText(rawSkinPath, 160);
+
+  const player = {
+    socketId: sock.id,
+    userId,
+    username: finalUsername,
+    pseudo: finalUsername,
+    deviceId: probe.deviceId,
+    vehicleId: String(vehicleId || busId || 'bus_default'),
+    skinId: finalSkinId,
+    skinPath: finalSkinPath,
+    busInfo: cleanBusInfo(busInfo),
+    transform: null,
+    headlight: false,
+    turnLeft: false,
+    turnRight: false,
+    hazard: false,
+    brake: false,
+    reverse: false,
+    showNameTag: true,
+    showVoiceIcon: false,
+    isTalking: false,
+    lastUpdateTs: 0,
+    inVoice: false,
+    muted: false,
+  };
+  room.players.set(sock.id, player);
+  if (hadHostStale) {
+    room.hostId = sock.id;
+    room.hostSocketId = sock.id;
+    io.to(room.id).emit('roomHostChanged', { newHostSocketId: sock.id, newHostPseudo: player.pseudo });
+  }
+  sock.join(room.id);
+  if (sock.data.web) sock.join(webRoom(room));
+  sock.data.roomId = room.id;
+
+  sock.to(room.id).emit('playerJoined', {
+    id: sock.id,
+    socketId: sock.id,
+    userId: player.userId,
+    username: player.username,
+    pseudo: player.pseudo,
+    name: player.pseudo,
+    vehicleId: player.vehicleId,
+    skinId: player.skinId,
+    skinPath: player.skinPath,
+    skinTex: player.skinPath || player.skinId,
+    skin: player.skinPath,
+    skinName: player.skinPath,
+    busInfo: player.busInfo,
+    headlight: player.headlight,
+    turnLeft: player.turnLeft,
+    turnRight: player.turnRight,
+    hazard: player.hazard,
+    brake: player.brake,
+    reverse: player.reverse,
+    showNameTag: player.showNameTag,
+    showVoiceIcon: player.showVoiceIcon,
+    isTalking: player.isTalking,
+  });
+
+  sendRoomState(sock, room);
 
   emitMembers(room);
   if ((room.hostSocketId || room.hostId) === sock.id) emitBans(room);
@@ -980,6 +1044,8 @@ io.on('connection', (socket) => {
 
   socket.on('createRoom', async (payload, callback) => {
     const ack = typeof callback === 'function' ? callback : () => {};
+    if (socket.data.roomBusy) return ack({ ok: false, error: 'Opération déjà en cours.', code: 'BUSY' });
+    socket.data.roomBusy = true;
     try {
       if (!validatePayloadSize(payload, 30, 500)) {
         logSecuThrottled(`createRoom_size_${socket.id}`, `Socket ${socket.id} - Payload createRoom invalide ou trop grand.`);
@@ -1041,11 +1107,15 @@ io.on('connection', (socket) => {
     } catch (err) {
       console.error('[createRoom] erreur:', err);
       return ack({ ok: false, error: 'Erreur serveur.' });
+    } finally {
+      socket.data.roomBusy = false;
     }
   });
 
   socket.on('joinRoom', async (payload, callback) => {
     const ack = typeof callback === 'function' ? callback : () => {};
+    if (socket.data.roomBusy) return ack({ ok: false, error: 'Opération déjà en cours.', code: 'BUSY' });
+    socket.data.roomBusy = true;
     try {
       if (!validatePayloadSize(payload, 30, 500)) {
         logSecuThrottled(`joinRoom_size_${socket.id}`, `Socket ${socket.id} - Payload joinRoom invalide ou trop grand.`);
@@ -1076,6 +1146,8 @@ io.on('connection', (socket) => {
     } catch (err) {
       console.error('[joinRoom] erreur:', err);
       return ack({ ok: false, error: 'Erreur serveur.' });
+    } finally {
+      socket.data.roomBusy = false;
     }
   });
 
@@ -1433,6 +1505,28 @@ io.on('connection', (socket) => {
     removeFromRoom(socket);
   });
 });
+
+// Balayage des connexions fantômes : un joueur dont le socket n'existe plus est retiré du salon.
+setInterval(() => {
+  let changed = false;
+  for (const room of Array.from(rooms.values())) {
+    for (const sid of Array.from(room.players.keys())) {
+      if (io.sockets.sockets.has(sid)) continue;
+      const ghost = room.players.get(sid);
+      room.players.delete(sid);
+      io.to(room.id).emit('playerLeft', { socketId: sid, userId: ghost?.userId, username: ghost?.username });
+      changed = true;
+    }
+    if (room.players.size === 0) { rooms.delete(room.id); continue; }
+    if (!room.players.has(room.hostSocketId || room.hostId)) {
+      const nextHost = Array.from(room.players.values())[0];
+      room.hostId = room.hostSocketId = nextHost.socketId;
+      io.to(room.id).emit('roomHostChanged', { newHostSocketId: nextHost.socketId, newHostPseudo: nextHost.pseudo });
+    }
+    emitMembers(room);
+  }
+  if (changed) io.emit('roomList', publicRoomList());
+}, 15000).unref();
 
 // ------------------------------------------------------------------
 // Démarrage
