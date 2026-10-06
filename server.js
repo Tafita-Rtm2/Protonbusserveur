@@ -25,7 +25,7 @@ const db = require('./db');
 const PORT = process.env.PORT || 7860;
 const TICK_RATE = 30;
 const MIN_TICK_INTERVAL_MS = 1000 / TICK_RATE;
-const DEFAULT_MAX_PLAYERS = 10;
+const DEFAULT_MAX_PLAYERS = 20;
 const JWT_EXPIRES_IN = '7d';
 
 const ADMIN_CODE = process.env.ADMIN_CODE;
@@ -773,7 +773,57 @@ function emitBans(room) {
   });
 }
 
-function joinRoomInternal(sock, roomId, { password, mapId, busId, username, pseudo, vehicleId, skinId, skinPath, busInfo }) {
+// ------------------------------------------------------------------
+// Anti-doublons : une même personne ne doit compter qu'UNE fois dans un salon.
+// Cause du bug "2/10" (création) et "4/10" (clic sur Rejoindre) : l'interface web
+// rejoint le salon avec sa propre connexion, puis le jeu (mod) ouvre une 2e
+// connexion et rejoint à nouveau => 2 joueurs pour 1 personne.
+// ------------------------------------------------------------------
+function sameIdentity(oldSock, newSock, oldPlayer, probe) {
+  if (!oldPlayer || oldPlayer.socketId === probe.socketId) return false;
+  const oldKey = oldSock?.data?.keyCode;
+  const newKey = newSock?.data?.keyCode;
+  if (oldKey && newKey && oldKey === newKey) return true;                       // même clé d'activation
+  if (oldPlayer.userId && probe.userId && !String(oldPlayer.userId).startsWith('user_') && oldPlayer.userId === probe.userId) return true; // même compte
+  if (oldPlayer.deviceId && probe.deviceId && oldPlayer.deviceId === probe.deviceId) return true; // même appareil
+  const oldIp = oldSock?.handshake?.address;
+  const newIp = newSock?.handshake?.address;
+  if (oldIp && newIp && oldIp === newIp && userKey(oldPlayer.username) === userKey(probe.username)) return true; // même IP + même pseudo
+  return false;
+}
+
+// Retire une session périmée du salon SANS supprimer le salon et SANS casser l'hôte.
+function evictStalePlayer(room, staleId) {
+  const stale = room.players.get(staleId);
+  if (!stale) return;
+  room.players.delete(staleId);
+  const staleSock = io.sockets.sockets.get(staleId);
+  if (staleSock) {
+    if (staleSock.data.roomId === room.id) staleSock.data.roomId = null;
+    staleSock.leave(room.id);
+    staleSock.leave(webRoom(room));
+    staleSock.emit('duplicateSession', { roomId: room.id, reason: 'Session remplacée par une nouvelle connexion.' });
+  }
+  if (stale.inVoice) io.to(webRoom(room)).emit('voice:peer-left', { socketId: staleId });
+  io.to(room.id).emit('playerLeft', { socketId: staleId, userId: stale.userId, username: stale.username || stale.pseudo });
+}
+
+function sendRoomState(sock, room) {
+  sock.emit('roomState', {
+    room: publicRoom(room),
+    players: Array.from(room.players.values())
+      .filter((p) => p.socketId !== sock.id)
+      .map((p) => ({
+        socketId: p.socketId, userId: p.userId, username: p.username, pseudo: p.pseudo,
+        vehicleId: p.vehicleId, skinId: p.skinId, skinPath: p.skinPath, busInfo: p.busInfo,
+        transform: p.transform, headlight: p.headlight, turnLeft: p.turnLeft, turnRight: p.turnRight,
+        hazard: p.hazard, brake: p.brake, reverse: p.reverse,
+        showNameTag: p.showNameTag, showVoiceIcon: p.showVoiceIcon, isTalking: p.isTalking,
+      })),
+  });
+}
+
+function joinRoomInternal(sock, roomId, { password, mapId, busId, username, pseudo, vehicleId, skinId, skinPath, busInfo, deviceId, clientId }) {
   const room = rooms.get(roomId);
   if (!room) return { ok: false, error: 'Room introuvable.' };
 
@@ -783,6 +833,24 @@ function joinRoomInternal(sock, roomId, { password, mapId, busId, username, pseu
   if (room.bans.has(`u:${userId}`) || room.bans.has(`n:${userKey(finalUsername)}`)) {
     return { ok: false, error: 'Tu as été banni de cette room.', code: 'BANNED' };
   }
+  // Déjà dans ce salon (double clic / ré-émission) : pas de recomptage, on renvoie juste l'état.
+  if (room.players.has(sock.id)) {
+    sendRoomState(sock, room);
+    return { ok: true, room: publicRoom(room), alreadyJoined: true };
+  }
+
+  const probe = { socketId: sock.id, userId, username: finalUsername, deviceId: cleanText(deviceId || clientId || '', 80) || null };
+  const dupIds = [];
+  for (const [sid, p] of room.players) {
+    if (sameIdentity(io.sockets.sockets.get(sid), sock, p, probe)) dupIds.push(sid);
+  }
+  // L'interface web ne remplace jamais la connexion du jeu : la personne est déjà dans le salon.
+  if (sock.data.web && dupIds.some((sid) => !io.sockets.sockets.get(sid)?.data?.web)) {
+    return { ok: true, room: publicRoom(room), alreadyJoined: true };
+  }
+  const hadHostStale = dupIds.includes(room.hostSocketId || room.hostId);
+  for (const sid of dupIds) evictStalePlayer(room, sid);
+
   if (room.players.size >= room.maxPlayers) return { ok: false, error: 'Room pleine.' };
 
   if (room.passwordHash) {
@@ -805,6 +873,7 @@ function joinRoomInternal(sock, roomId, { password, mapId, busId, username, pseu
     userId,
     username: finalUsername,
     pseudo: finalUsername,
+    deviceId: probe.deviceId,
     vehicleId: String(vehicleId || busId || 'bus_default'),
     skinId: finalSkinId,
     skinPath: finalSkinPath,
@@ -824,6 +893,11 @@ function joinRoomInternal(sock, roomId, { password, mapId, busId, username, pseu
     muted: false,
   };
   room.players.set(sock.id, player);
+  if (hadHostStale) {
+    room.hostId = sock.id;
+    room.hostSocketId = sock.id;
+    io.to(room.id).emit('roomHostChanged', { newHostSocketId: sock.id, newHostPseudo: player.pseudo });
+  }
   sock.join(room.id);
   if (sock.data.web) sock.join(webRoom(room));
   sock.data.roomId = room.id;
@@ -848,31 +922,7 @@ function joinRoomInternal(sock, roomId, { password, mapId, busId, username, pseu
     isTalking: player.isTalking,
   });
 
-  sock.emit('roomState', {
-    room: publicRoom(room),
-    players: Array.from(room.players.values())
-      .filter((p) => p.socketId !== sock.id)
-      .map((p) => ({
-        socketId: p.socketId,
-        userId: p.userId,
-        username: p.username,
-        pseudo: p.pseudo,
-        vehicleId: p.vehicleId,
-        skinId: p.skinId,
-        skinPath: p.skinPath,
-        busInfo: p.busInfo,
-        transform: p.transform,
-        headlight: p.headlight,
-        turnLeft: p.turnLeft,
-        turnRight: p.turnRight,
-        hazard: p.hazard,
-        brake: p.brake,
-        reverse: p.reverse,
-        showNameTag: p.showNameTag,
-        showVoiceIcon: p.showVoiceIcon,
-        isTalking: p.isTalking,
-      })),
-  });
+  sendRoomState(sock, room);
 
   emitMembers(room);
   if ((room.hostSocketId || room.hostId) === sock.id) emitBans(room);
@@ -955,6 +1005,8 @@ io.on('connection', (socket) => {
 
   socket.on('createRoom', async (payload, callback) => {
     const ack = typeof callback === 'function' ? callback : () => {};
+    if (socket.data.roomBusy) return ack({ ok: false, error: 'Action déjà en cours, patiente un instant.', code: 'BUSY' });
+    socket.data.roomBusy = true;
     try {
       if (!validatePayloadSize(payload, 30, 500)) {
         logSecuThrottled(`createRoom_size_${socket.id}`, `Socket ${socket.id} - Payload createRoom invalide ou trop grand.`);
@@ -980,7 +1032,7 @@ io.on('connection', (socket) => {
         }
       }
 
-      const { roomName, name, isPrivate, password, mapId, busId, maxPlayers, username: pu, pseudo: pp, vehicleId, skinId, skinPath, busInfo } = payload || {};
+      const { roomName, name, isPrivate, password, mapId, busId, maxPlayers, username: pu, pseudo: pp, vehicleId, skinId, skinPath, busInfo, deviceId, clientId } = payload || {};
       const username = socket.user?.username || socket.user?.pseudo || pu || pp || `Joueur_${socket.id.slice(0, 5)}`;
 
       const finalRoomName = cleanText(roomName || name, 60);
@@ -1006,7 +1058,7 @@ io.on('connection', (socket) => {
       };
       rooms.set(room.id, room);
 
-      const joinResult = joinRoomInternal(socket, room.id, { password, mapId: finalMapId, busId: finalBusId, username, pseudo: username, vehicleId, skinId, skinPath, busInfo });
+      const joinResult = joinRoomInternal(socket, room.id, { password, mapId: finalMapId, busId: finalBusId, username, pseudo: username, vehicleId, skinId, skinPath, busInfo, deviceId, clientId });
       if (!joinResult.ok) {
         rooms.delete(room.id);
         return ack(joinResult);
@@ -1016,11 +1068,15 @@ io.on('connection', (socket) => {
     } catch (err) {
       console.error('[createRoom] erreur:', err);
       return ack({ ok: false, error: 'Erreur serveur.' });
+    } finally {
+      socket.data.roomBusy = false;
     }
   });
 
   socket.on('joinRoom', async (payload, callback) => {
     const ack = typeof callback === 'function' ? callback : () => {};
+    if (socket.data.roomBusy) return ack({ ok: false, error: 'Action déjà en cours, patiente un instant.', code: 'BUSY' });
+    socket.data.roomBusy = true;
     try {
       if (!validatePayloadSize(payload, 30, 500)) {
         logSecuThrottled(`joinRoom_size_${socket.id}`, `Socket ${socket.id} - Payload joinRoom invalide ou trop grand.`);
@@ -1051,6 +1107,8 @@ io.on('connection', (socket) => {
     } catch (err) {
       console.error('[joinRoom] erreur:', err);
       return ack({ ok: false, error: 'Erreur serveur.' });
+    } finally {
+      socket.data.roomBusy = false;
     }
   });
 
@@ -1320,7 +1378,29 @@ io.on('connection', (socket) => {
 // Démarrage
 // ------------------------------------------------------------------
 db.init().then((mode) => {
-  server.listen(PORT, '0.0.0.0', () => {
+  // Balayage des connexions fantômes : un joueur dont le socket n'existe plus est retiré du salon.
+setInterval(() => {
+  let changed = false;
+  for (const room of Array.from(rooms.values())) {
+    for (const sid of Array.from(room.players.keys())) {
+      if (io.sockets.sockets.has(sid)) continue;
+      const ghost = room.players.get(sid);
+      room.players.delete(sid);
+      io.to(room.id).emit('playerLeft', { socketId: sid, userId: ghost?.userId, username: ghost?.username });
+      changed = true;
+    }
+    if (room.players.size === 0) { rooms.delete(room.id); continue; }
+    if (!room.players.has(room.hostSocketId || room.hostId)) {
+      const nextHost = Array.from(room.players.values())[0];
+      room.hostId = room.hostSocketId = nextHost.socketId;
+      io.to(room.id).emit('roomHostChanged', { newHostSocketId: nextHost.socketId, newHostPseudo: nextHost.pseudo });
+    }
+    emitMembers(room);
+  }
+  if (changed) io.emit('roomList', publicRoomList());
+}, 15000).unref();
+
+server.listen(PORT, '0.0.0.0', () => {
     console.log(`🚌 Serveur Proton Bus — port ${PORT} — BDD: ${mode}`);
     console.log(`   CORS: ${ALLOWED_ORIGINS.length ? ALLOWED_ORIGINS.join(', ') : '*'}`);
     console.log(`   ADMIN_CODE configuré: ${ADMIN_CODE ? 'OUI' : 'NON'}`);
