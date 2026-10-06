@@ -289,30 +289,7 @@ const io = new Server(server, {
   pingInterval: 10000,
   pingTimeout: 5000,
   maxHttpBufferSize: 1e5,
-  perMessageDeflate: false,   // pas de compression : économise le CPU, les paquets sont déjà courts
 });
-
-const { createRelay } = require('./relay');
-const relay = createRelay({ io, rooms });
-
-// Configuration P2P annoncée aux clients (le mod peut l'ignorer : le serveur reste le secours).
-const P2P_ENABLED = process.env.P2P_ENABLED !== 'false';
-const P2P_CONFIG = {
-  enabled: P2P_ENABLED,
-  stun: (process.env.P2P_STUN || 'stun.l.google.com:19302,stun1.l.google.com:19302').split(',').map((x) => x.trim()).filter(Boolean),
-  udpPort: Number(process.env.P2P_UDP_PORT) || 8999,
-  linkRefreshMs: 2000,
-};
-
-// Anti-rafale : la liste des salons n'est envoyée à tout le monde qu'au plus 1 fois / 150 ms.
-let roomListTimer = null;
-function scheduleRoomList() {
-  if (roomListTimer) return;
-  roomListTimer = setTimeout(() => {
-    roomListTimer = null;
-    io.emit('roomList', publicRoomList());
-  }, 150);
-}
 
 function isProxyCall(req) {
   return !!API_PROXY_KEY && safeEqual(req.headers['x-proxy-key'], API_PROXY_KEY);
@@ -647,8 +624,6 @@ app.get('/api/me', requireProxy, playerAuthMiddleware, async (req, res) => {
 
 app.get('/api/health', (req, res) => res.json({ ok: true }));
 app.get('/api/rooms', (req, res) => res.json({ rooms: publicRoomList() }));
-// Statistiques du relais (messages envoyés / économisés) — protégé comme les autres routes sensibles.
-app.get('/api/relay-stats', requireProxy, (req, res) => res.json({ relay: relay.stats(), rooms: rooms.size, p2p: P2P_CONFIG }));
 
 // Express Static Dashboard fallback
 if (ENABLE_DASHBOARD) {
@@ -798,20 +773,6 @@ function emitBans(room) {
   });
 }
 
-// Nom "sûr" pour le jeu : le mod C++ lit le JSON avec un parseur simplifié qui coupe le nom au premier
-// guillemet, virgule, accolade ou crochet. On retire ces caractères (et les contrôles) pour que le pseudo
-// affiché au-dessus du bus soit toujours complet.
-function wireName(name, fallback = 'Joueur') {
-  const cleaned = String(name == null ? '' : name)
-    .replace(/[\u0000-\u001f\u007f"\\,{}\[\]<>]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .slice(0, 24)
-    .trim();
-  if (!cleaned || /^(null|undefined|nan)$/i.test(cleaned)) return fallback;
-  return cleaned;
-}
-
 // ------------------------------------------------------------------
 // Anti-doublons : une même personne ne doit compter qu'UNE fois dans un salon.
 // Cause du bug "2/10" (création) et "4/10" (clic sur Rejoindre) : l'interface web
@@ -866,7 +827,7 @@ function joinRoomInternal(sock, roomId, { password, mapId, busId, username, pseu
   const room = rooms.get(roomId);
   if (!room) return { ok: false, error: 'Room introuvable.' };
 
-  const finalUsername = wireName(sock.user?.username || sock.user?.pseudo || username || pseudo, `Joueur_${sock.id.slice(0, 5)}`);
+  const finalUsername = cleanText(sock.user?.username || sock.user?.pseudo || username || pseudo || `Joueur_${sock.id.slice(0, 5)}`, 24);
   const userId = sock.user?.id || genId('user');
 
   if (room.bans.has(`u:${userId}`) || room.bans.has(`n:${userKey(finalUsername)}`)) {
@@ -1012,7 +973,7 @@ function removeFromRoom(sock) {
     }
     emitMembers(room);
   }
-  scheduleRoomList();
+  io.emit('roomList', publicRoomList());
 }
 
 // Socket Connection Events
@@ -1102,8 +1063,8 @@ io.on('connection', (socket) => {
         rooms.delete(room.id);
         return ack(joinResult);
       }
-      scheduleRoomList();
-      return ack({ ok: true, room: publicRoom(room), p2p: P2P_CONFIG });
+      io.emit('roomList', publicRoomList());
+      return ack({ ok: true, room: publicRoom(room) });
     } catch (err) {
       console.error('[createRoom] erreur:', err);
       return ack({ ok: false, error: 'Erreur serveur.' });
@@ -1141,8 +1102,8 @@ io.on('connection', (socket) => {
       if (socket.data.roomId && socket.data.roomId !== roomId) removeFromRoom(socket);
 
       const result = joinRoomInternal(socket, String(roomId), payload || {});
-      if (result.ok) scheduleRoomList();
-      return ack(result.ok ? { ...result, p2p: P2P_CONFIG } : result);
+      if (result.ok) io.emit('roomList', publicRoomList());
+      return ack(result);
     } catch (err) {
       console.error('[joinRoom] erreur:', err);
       return ack({ ok: false, error: 'Erreur serveur.' });
@@ -1244,7 +1205,7 @@ io.on('connection', (socket) => {
       if (s) { s.data.roomId = null; s.leave(room.id); s.leave(webRoom(room)); }
     }
     rooms.delete(room.id);
-    scheduleRoomList();
+    io.emit('roomList', publicRoomList());
     ack({ ok: true });
   });
 
@@ -1306,58 +1267,6 @@ io.on('connection', (socket) => {
     try { size = JSON.stringify(payload.data || {}).length; } catch (e) { return; }
     if (size > 20000) return;
     io.to(target.socketId).emit('voice:signal', { from: socket.id, data: payload.data });
-  });
-
-  // ---------------- P2P : signalisation (le serveur ne fait que mettre en relation) ----------------
-  const p2pRate = { ts: 0, n: 0 };
-  const p2pAllowed = () => {
-    const now = Date.now();
-    if (now - p2pRate.ts > 1000) { p2pRate.ts = now; p2pRate.n = 0; }
-    return ++p2pRate.n <= 40;
-  };
-
-  // Le client annonce ses adresses publiques (découvertes via STUN) et son type de NAT.
-  socket.on('p2p:announce', (payload, callback) => {
-    const ack = typeof callback === 'function' ? callback : () => {};
-    try {
-      if (!P2P_ENABLED || !p2pAllowed()) return ack({ ok: false, error: 'P2P indisponible.' });
-      const room = getRoomOf(socket);
-      const me = room && room.players.get(socket.id);
-      if (!me) return ack({ ok: false, error: "Vous n'êtes dans aucune room." });
-      const eps = (Array.isArray(payload?.endpoints) ? payload.endpoints : []).slice(0, 4)
-        .map((e) => ({ ip: cleanText(e?.ip, 64), port: Number(e?.port) | 0 }))
-        .filter((e) => e.ip && e.port > 0 && e.port < 65536);
-      me.p2p = me.p2p || {};
-      me.p2p.endpoints = eps;
-      me.p2p.nat = cleanText(payload?.nat || 'unknown', 24);
-      socket.to(room.id).emit('p2p:peer', { socketId: socket.id, endpoints: eps, nat: me.p2p.nat });
-      const peers = Array.from(room.players.values())
-        .filter((p) => p.socketId !== socket.id && p.p2p && p.p2p.endpoints)
-        .map((p) => ({ socketId: p.socketId, endpoints: p.p2p.endpoints, nat: p.p2p.nat }));
-      return ack({ ok: true, peers, p2p: P2P_CONFIG });
-    } catch (err) {
-      console.error('[p2p:announce] erreur:', err);
-      return ack({ ok: false, error: 'Erreur serveur.' });
-    }
-  });
-
-  // Relais de messages de négociation (hole punching) entre deux joueurs d'un même salon.
-  socket.on('p2p:signal', (payload) => {
-    if (!P2P_ENABLED || !p2pAllowed() || !payload || typeof payload.to !== 'string') return;
-    if (!validatePayloadSize(payload, 20, 2000)) return;
-    const room = getRoomOf(socket);
-    if (!room || !room.players.has(socket.id) || !room.players.has(payload.to)) return;
-    io.to(payload.to).emit('p2p:signal', { from: socket.id, data: payload.data });
-  });
-
-  // Le client liste les pairs avec lesquels sa liaison directe fonctionne. Quand les DEUX côtés le déclarent,
-  // le serveur arrête (presque) de relayer entre eux. Si le client cesse de rafraîchir, le relais reprend seul.
-  socket.on('p2p:links', (payload) => {
-    if (!P2P_ENABLED || !p2pAllowed()) return;
-    const room = getRoomOf(socket);
-    const me = room && room.players.get(socket.id);
-    if (!me) return;
-    relay.setLinks(me, payload?.peers);
   });
 
   socket.on('vehicleUpdate', (payload) => {
@@ -1436,12 +1345,23 @@ io.on('connection', (socket) => {
     };
     player.transform = transform;
 
-    // Diffusion déléguée au relais allégé (tick groupé, delta, distance, P2P).
-    relay.update(room, player, {
-      position: transform.position, rotation: transform.rotation,
-      steerInput, throttle, handbrake,
+    socket.to(room.id).volatile.emit('vehicleUpdate', {
+      roomId: room.id,
+      socketId: socket.id,
+      userId: player.userId,
+      username: player.username,
+      pseudo: player.pseudo,
+      vehicleId: player.vehicleId,
+      skinId: player.skinId,
+      skinPath: player.skinPath,
+      ...(cleanedBusInfo ? { busInfo: cleanedBusInfo } : {}),
+      position: transform.position,
+      rotation: transform.rotation,
+      controls: transform.controls,
+      steerInput, throttle, brake: brakeCtrl, handbrake,
       headlight, turnLeft, turnRight, hazard, brake, reverse,
       showNameTag, showVoiceIcon, isTalking,
+      transform,
     });
   });
 
@@ -1477,7 +1397,7 @@ setInterval(() => {
     }
     emitMembers(room);
   }
-  if (changed) scheduleRoomList();
+  if (changed) io.emit('roomList', publicRoomList());
 }, 15000).unref();
 
 server.listen(PORT, '0.0.0.0', () => {
