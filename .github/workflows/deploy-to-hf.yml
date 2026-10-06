@@ -1,0 +1,45 @@
+name: Sync to Hugging Face Space
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Push to Hugging Face Space
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          set +e
+          {
+            echo "=== git remote add ==="
+            git remote add space https://Tafitaniaina:${HF_TOKEN}@huggingface.co/spaces/Tafitaniaina/TVserveur
+            echo "=== git ls-remote AVANT push ==="
+            git ls-remote space main
+            echo "=== git push ==="
+            git push --force space main 2>&1
+            echo "PUSH_EXIT=$?"
+            echo "=== git ls-remote APRES push ==="
+            git ls-remote space main
+            echo "=== HEAD local ==="
+            git rev-parse HEAD
+          } > deploy-hf.log 2>&1
+          cat deploy-hf.log
+
+      - name: Commit diagnostic log
+        if: always()
+        run: |
+          git config user.name "build-bot"
+          git config user.email "build-bot@users.noreply.github.com"
+          git add -f deploy-hf.log
+          git commit -m "diagnostic: deploy-hf.log [skip ci]" || echo "rien"
+          git push origin HEAD:main || echo "push origin echoue"

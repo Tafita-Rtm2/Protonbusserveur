@@ -25,7 +25,6 @@ Module._load = function (req, ...a) { return req === '@supabase/supabase-js' ? {
 process.env.SUPABASE_URL = 'https://x.supabase.co';
 process.env.SUPABASE_SECRET_KEY = 'sb_secret_fake';
 process.env.DATA_DIR = '/tmp/nodata';
-try { require('fs').unlinkSync('/tmp/nodata/keys.json'); } catch (e) {}
 
 let p = 0, f = 0;
 const ok = (c, m) => { c ? (p++, console.log('  ✔', m)) : (f++, console.log('  ✘ FAIL:', m)); };

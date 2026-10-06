@@ -25,7 +25,7 @@ const db = require('./db');
 const PORT = process.env.PORT || 7860;
 const TICK_RATE = 30;
 const MIN_TICK_INTERVAL_MS = 1000 / TICK_RATE;
-const DEFAULT_MAX_PLAYERS = 20;
+const DEFAULT_MAX_PLAYERS = 10;
 const JWT_EXPIRES_IN = '7d';
 
 const ADMIN_CODE = process.env.ADMIN_CODE;
@@ -197,15 +197,10 @@ function checkVehicleUpdateRateLimit(socket) {
     return true;
   }
   history.count += 1;
-  if (history.count > 80) {
+  if (history.count > 35) {
     return false;
   }
   return true;
-}
-
-function isTruthy(v) {
-  if (v === true || v === 1 || v === '1' || v === 'true' || v === 'True' || v === 'TRUE') return true;
-  return false;
 }
 
 function validatePayloadSize(payload, maxKeys = 30, maxStringLen = 500) {
@@ -778,89 +773,7 @@ function emitBans(room) {
   });
 }
 
-
-// ------------------------------------------------------------------
-// Anti-doublons : un même joueur ne doit JAMAIS compter 2 fois dans un salon
-// (cause du bug "2/10" à la création et "4/10" après un clic sur Rejoindre :
-// le jeu ouvre une 2e connexion socket ou se reconnecte pendant que l'ancienne
-// connexion "fantôme" est encore dans le salon).
-// ------------------------------------------------------------------
-function sameIdentity(oldSock, newSock, oldPlayer, newPlayer) {
-  if (!oldPlayer || oldPlayer.socketId === newPlayer.socketId) return false;
-  // 1) même clé d'activation
-  const oldKey = oldSock?.data?.keyCode;
-  const newKey = newSock?.data?.keyCode;
-  if (oldKey && newKey && oldKey === newKey) return true;
-  // 2) même compte (userId stable, hors invités)
-  if (oldPlayer.userId && newPlayer.userId && !String(oldPlayer.userId).startsWith('user_') && oldPlayer.userId === newPlayer.userId) return true;
-  // 3) même identifiant d'appareil fourni par le client
-  if (oldPlayer.deviceId && newPlayer.deviceId && oldPlayer.deviceId === newPlayer.deviceId) return true;
-  // 4) invité : même pseudo + même IP = même appareil
-  const oldIp = oldSock?.handshake?.address;
-  const newIp = newSock?.handshake?.address;
-  if (oldIp && newIp && oldIp === newIp && userKey(oldPlayer.username) === userKey(newPlayer.username)) return true;
-  return false;
-}
-
-// Retire un joueur périmé du salon SANS supprimer le salon et SANS casser l'hôte.
-function evictStalePlayer(room, staleId) {
-  const stale = room.players.get(staleId);
-  if (!stale) return;
-  room.players.delete(staleId);
-  const staleSock = io.sockets.sockets.get(staleId);
-  if (staleSock) {
-    if (staleSock.data.roomId === room.id) staleSock.data.roomId = null;
-    staleSock.leave(room.id);
-    staleSock.leave(webRoom(room));
-    staleSock.emit('duplicateSession', { roomId: room.id, reason: 'Session remplacée par une nouvelle connexion.' });
-  }
-  io.to(room.id).emit('playerLeft', { socketId: staleId, userId: stale.userId, username: stale.username || stale.pseudo });
-}
-
-function sendRoomState(sock, room) {
-  sock.emit('roomState', {
-    room: publicRoom(room),
-    players: Array.from(room.players.values())
-      .filter((p) => p.socketId !== sock.id)
-      .map((p) => ({
-        id: p.socketId,
-        socketId: p.socketId,
-        userId: p.userId,
-        username: p.username,
-        pseudo: p.pseudo,
-        name: p.pseudo,
-        vehicleId: p.vehicleId,
-        skinId: p.skinId,
-        skinPath: p.skinPath,
-        skinTex: p.skinPath || p.skinId,
-        skin: p.skinPath,
-        skinName: p.skinPath,
-        busInfo: p.busInfo,
-        transform: p.transform,
-        position: p.transform?.position || { x: 0, y: 0, z: 0 },
-        rotation: p.transform?.rotation || { x: 0, y: 0, z: 0, w: 1 },
-        x: p.transform?.position?.x ?? 0,
-        y: p.transform?.position?.y ?? 0,
-        z: p.transform?.position?.z ?? 0,
-        rotX: p.transform?.rotation?.x ?? 0,
-        rotY: p.transform?.rotation?.y ?? 0,
-        rotZ: p.transform?.rotation?.z ?? 0,
-        rotW: p.transform?.rotation?.w ?? 1,
-        headlight: p.headlight,
-        turnLeft: p.turnLeft,
-        turnRight: p.turnRight,
-        hazard: p.hazard,
-        brake: p.brake,
-        reverse: p.reverse,
-        showNameTag: p.showNameTag,
-        showVoiceIcon: p.showVoiceIcon,
-        isTalking: p.isTalking,
-      })),
-  });
-
-}
-
-function joinRoomInternal(sock, roomId, { password, mapId, busId, username, pseudo, vehicleId, skinId, skinPath, skinTex, skin, skinName, busInfo, deviceId, clientId }) {
+function joinRoomInternal(sock, roomId, { password, mapId, busId, username, pseudo, vehicleId, skinId, skinPath, busInfo }) {
   const room = rooms.get(roomId);
   if (!room) return { ok: false, error: 'Room introuvable.' };
 
@@ -870,20 +783,6 @@ function joinRoomInternal(sock, roomId, { password, mapId, busId, username, pseu
   if (room.bans.has(`u:${userId}`) || room.bans.has(`n:${userKey(finalUsername)}`)) {
     return { ok: false, error: 'Tu as été banni de cette room.', code: 'BANNED' };
   }
-  // Déjà dans ce salon (double clic, double emit) : on répond OK sans recompter ni ré-annoncer.
-  if (room.players.has(sock.id)) {
-    sendRoomState(sock, room);
-    return { ok: true, room: publicRoom(room), alreadyJoined: true };
-  }
-
-  const probe = { socketId: sock.id, userId, username: finalUsername, deviceId: String(deviceId || clientId || '').slice(0, 80) || null };
-  const staleIds = [];
-  for (const [sid, p] of room.players) {
-    if (sameIdentity(io.sockets.sockets.get(sid), sock, p, probe)) staleIds.push(sid);
-  }
-  const hadHostStale = staleIds.includes(room.hostSocketId || room.hostId);
-  for (const sid of staleIds) evictStalePlayer(room, sid);
-
   if (room.players.size >= room.maxPlayers) return { ok: false, error: 'Room pleine.' };
 
   if (room.passwordHash) {
@@ -899,15 +798,13 @@ function joinRoomInternal(sock, roomId, { password, mapId, busId, username, pseu
   }
 
   const finalSkinId = String(skinId || 'default');
-  const rawSkinPath = skinPath || skinTex || skin || skinName || skinId || 'default';
-  const finalSkinPath = cleanText(rawSkinPath, 160);
+  const finalSkinPath = cleanText(skinPath || skinId || 'default', 160);
 
   const player = {
     socketId: sock.id,
     userId,
     username: finalUsername,
     pseudo: finalUsername,
-    deviceId: probe.deviceId,
     vehicleId: String(vehicleId || busId || 'bus_default'),
     skinId: finalSkinId,
     skinPath: finalSkinPath,
@@ -927,28 +824,18 @@ function joinRoomInternal(sock, roomId, { password, mapId, busId, username, pseu
     muted: false,
   };
   room.players.set(sock.id, player);
-  if (hadHostStale) {
-    room.hostId = sock.id;
-    room.hostSocketId = sock.id;
-    io.to(room.id).emit('roomHostChanged', { newHostSocketId: sock.id, newHostPseudo: player.pseudo });
-  }
   sock.join(room.id);
   if (sock.data.web) sock.join(webRoom(room));
   sock.data.roomId = room.id;
 
   sock.to(room.id).emit('playerJoined', {
-    id: sock.id,
     socketId: sock.id,
     userId: player.userId,
     username: player.username,
     pseudo: player.pseudo,
-    name: player.pseudo,
     vehicleId: player.vehicleId,
     skinId: player.skinId,
     skinPath: player.skinPath,
-    skinTex: player.skinPath || player.skinId,
-    skin: player.skinPath,
-    skinName: player.skinPath,
     busInfo: player.busInfo,
     headlight: player.headlight,
     turnLeft: player.turnLeft,
@@ -961,7 +848,31 @@ function joinRoomInternal(sock, roomId, { password, mapId, busId, username, pseu
     isTalking: player.isTalking,
   });
 
-  sendRoomState(sock, room);
+  sock.emit('roomState', {
+    room: publicRoom(room),
+    players: Array.from(room.players.values())
+      .filter((p) => p.socketId !== sock.id)
+      .map((p) => ({
+        socketId: p.socketId,
+        userId: p.userId,
+        username: p.username,
+        pseudo: p.pseudo,
+        vehicleId: p.vehicleId,
+        skinId: p.skinId,
+        skinPath: p.skinPath,
+        busInfo: p.busInfo,
+        transform: p.transform,
+        headlight: p.headlight,
+        turnLeft: p.turnLeft,
+        turnRight: p.turnRight,
+        hazard: p.hazard,
+        brake: p.brake,
+        reverse: p.reverse,
+        showNameTag: p.showNameTag,
+        showVoiceIcon: p.showVoiceIcon,
+        isTalking: p.isTalking,
+      })),
+  });
 
   emitMembers(room);
   if ((room.hostSocketId || room.hostId) === sock.id) emitBans(room);
@@ -1044,8 +955,6 @@ io.on('connection', (socket) => {
 
   socket.on('createRoom', async (payload, callback) => {
     const ack = typeof callback === 'function' ? callback : () => {};
-    if (socket.data.roomBusy) return ack({ ok: false, error: 'Opération déjà en cours.', code: 'BUSY' });
-    socket.data.roomBusy = true;
     try {
       if (!validatePayloadSize(payload, 30, 500)) {
         logSecuThrottled(`createRoom_size_${socket.id}`, `Socket ${socket.id} - Payload createRoom invalide ou trop grand.`);
@@ -1107,15 +1016,11 @@ io.on('connection', (socket) => {
     } catch (err) {
       console.error('[createRoom] erreur:', err);
       return ack({ ok: false, error: 'Erreur serveur.' });
-    } finally {
-      socket.data.roomBusy = false;
     }
   });
 
   socket.on('joinRoom', async (payload, callback) => {
     const ack = typeof callback === 'function' ? callback : () => {};
-    if (socket.data.roomBusy) return ack({ ok: false, error: 'Opération déjà en cours.', code: 'BUSY' });
-    socket.data.roomBusy = true;
     try {
       if (!validatePayloadSize(payload, 30, 500)) {
         logSecuThrottled(`joinRoom_size_${socket.id}`, `Socket ${socket.id} - Payload joinRoom invalide ou trop grand.`);
@@ -1146,8 +1051,6 @@ io.on('connection', (socket) => {
     } catch (err) {
       console.error('[joinRoom] erreur:', err);
       return ack({ ok: false, error: 'Erreur serveur.' });
-    } finally {
-      socket.data.roomBusy = false;
     }
   });
 
@@ -1308,25 +1211,19 @@ io.on('connection', (socket) => {
     io.to(target.socketId).emit('voice:signal', { from: socket.id, data: payload.data });
   });
 
-  socket.on('vehicleUpdate', (payloadRaw) => {
+  socket.on('vehicleUpdate', (payload) => {
     const room = getRoomOf(socket);
     if (!room) return;
     const player = room.players.get(socket.id);
     if (!player) return;
 
-    let payload = payloadRaw;
-    if (typeof payload === 'string') {
-      try { payload = JSON.parse(payload); } catch (e) { return; }
-    }
-    if (!payload || typeof payload !== 'object') return;
-
-    if (!validatePayloadSize(payload, 120, 2000)) {
+    if (!validatePayloadSize(payload, 50, 500)) {
       logSecuThrottled(`vUpd_size_${socket.id}`, `Socket ${socket.id} - Payload vehicleUpdate invalide ou trop grand.`);
       return;
     }
 
     if (!checkVehicleUpdateRateLimit(socket)) {
-      logSecuThrottled(`vUpd_rate_${socket.id}`, `Socket ${socket.id} - Rate limit vehicleUpdate dépassé (>80msg/s).`);
+      logSecuThrottled(`vUpd_rate_${socket.id}`, `Socket ${socket.id} - Rate limit vehicleUpdate dépassé (>35msg/s).`);
       return;
     }
 
@@ -1339,102 +1236,31 @@ io.on('connection', (socket) => {
     }
 
     const now = Date.now();
+    if (now - player.lastUpdateTs < MIN_TICK_INTERVAL_MS) return;
     player.lastUpdateTs = now;
 
-    const rawPos = payload.position || payload.pos;
-    let posX = null, posY = null, posZ = null;
-    if (rawPos && typeof rawPos === 'object') {
-      if (Array.isArray(rawPos)) {
-        posX = Number(rawPos[0]);
-        posY = Number(rawPos[1]);
-        posZ = Number(rawPos[2]);
-      } else {
-        posX = Number(rawPos.x ?? rawPos.X ?? rawPos.posX);
-        posY = Number(rawPos.y ?? rawPos.Y ?? rawPos.posY);
-        posZ = Number(rawPos.z ?? rawPos.Z ?? rawPos.posZ);
-      }
-    }
-    if (posX === null || isNaN(posX)) {
-      const px = payload.x ?? payload.X ?? payload.posX;
-      const py = payload.y ?? payload.Y ?? payload.posY;
-      const pz = payload.z ?? payload.Z ?? payload.posZ;
-      if (px !== undefined && px !== null) posX = Number(px);
-      if (py !== undefined && py !== null) posY = Number(py);
-      if (pz !== undefined && pz !== null) posZ = Number(pz);
-    }
+    if (!payload || typeof payload !== 'object') return;
+    const position = payload.position || (payload.x !== undefined ? { x: payload.x, y: payload.y, z: payload.z } : null);
+    const rotation = payload.rotation || (payload.rotX !== undefined ? { x: payload.rotX, y: payload.rotY, z: payload.rotZ, w: payload.rotW } : null);
+    const controls = payload.controls;
+    if (!position || !rotation) return;
 
-    const rawRot = payload.rotation || payload.rot;
-    let rotX = null, rotY = null, rotZ = null, rotW = 1;
-    if (rawRot && typeof rawRot === 'object') {
-      if (Array.isArray(rawRot)) {
-        rotX = Number(rawRot[0]);
-        rotY = Number(rawRot[1]);
-        rotZ = Number(rawRot[2]);
-        rotW = Number(rawRot[3] ?? 1);
-      } else {
-        rotX = Number(rawRot.x ?? rawRot.X ?? rawRot.rotX);
-        rotY = Number(rawRot.y ?? rawRot.Y ?? rawRot.rotY);
-        rotZ = Number(rawRot.z ?? rawRot.Z ?? rawRot.rotZ);
-        rotW = Number(rawRot.w ?? rawRot.W ?? rawRot.rotW ?? 1);
-      }
-    }
-    if (rotX === null || isNaN(rotX)) {
-      const rx = payload.rotX ?? payload.rx ?? payload.RotX;
-      const ry = payload.rotY ?? payload.ry ?? payload.RotY;
-      const rz = payload.rotZ ?? payload.rz ?? payload.RotZ;
-      const rw = payload.rotW ?? payload.rw ?? payload.RotW ?? 1;
-      if (rx !== undefined && rx !== null) rotX = Number(rx);
-      if (ry !== undefined && ry !== null) rotY = Number(ry);
-      if (rz !== undefined && rz !== null) rotZ = Number(rz);
-      if (rw !== undefined && rw !== null) rotW = Number(rw);
-    }
-
-    if (posX === null || isNaN(posX) || posY === null || isNaN(posY) || posZ === null || isNaN(posZ)) {
-      if (player.transform?.position) {
-        posX = player.transform.position.x;
-        posY = player.transform.position.y;
-        posZ = player.transform.position.z;
-      } else {
-        return;
-      }
-    }
-    if (rotX === null || isNaN(rotX) || rotY === null || isNaN(rotY) || rotZ === null || isNaN(rotZ)) {
-      if (player.transform?.rotation) {
-        rotX = player.transform.rotation.x;
-        rotY = player.transform.rotation.y;
-        rotZ = player.transform.rotation.z;
-        rotW = player.transform.rotation.w ?? 1;
-      } else {
-        rotX = 0; rotY = 0; rotZ = 0; rotW = 1;
-      }
-    }
-
-    const ctrl = payload.controls || {};
+    const ctrl = controls || {};
     const steerInput = Number(ctrl.steerInput ?? payload.steerInput) || 0;
     const throttle = Number(ctrl.throttle ?? payload.throttle) || 0;
     const brakeCtrl = Number(ctrl.brake ?? payload.brake) || 0;
     const handbrake = Number(ctrl.handbrake ?? payload.handbrake) || 0;
 
-    const headlight = isTruthy(payload.headlight ?? payload.headLight ?? payload.lights);
-    const turnLeft = isTruthy(payload.turnLeft ?? payload.turn_left ?? payload.indicatorLeft);
-    const turnRight = isTruthy(payload.turnRight ?? payload.turn_right ?? payload.indicatorRight);
-    const hazard = isTruthy(payload.hazard ?? payload.hazards ?? payload.hazardLight);
-    const brake = isTruthy(payload.brake ?? payload.brakeLight ?? payload.stopLight ?? (brakeCtrl > 0));
-    const reverse = isTruthy(payload.reverse ?? payload.reverseLight ?? payload.reversing);
+    const headlight = Boolean(payload.headlight ?? false);
+    const turnLeft = Boolean(payload.turnLeft ?? false);
+    const turnRight = Boolean(payload.turnRight ?? false);
+    const hazard = Boolean(payload.hazard ?? false);
+    const brake = Boolean(payload.brake ?? (brakeCtrl > 0));
+    const reverse = Boolean(payload.reverse ?? false);
 
-    if (payload.vehicleId || payload.busId) player.vehicleId = cleanText(payload.vehicleId || payload.busId, 80);
-    const skinVal = payload.skinPath || payload.skinTex || payload.skin || payload.skinName || payload.skin_path || payload.skin_tex || payload.skinFile;
-    if (skinVal) {
-      player.skinPath = cleanText(skinVal, 160);
-    }
+    if (payload.vehicleId) player.vehicleId = cleanText(payload.vehicleId, 80);
     if (payload.skinId) player.skinId = cleanText(payload.skinId, 80);
-    if (payload.pseudo || payload.username || payload.name) {
-      const pName = cleanText(payload.pseudo || payload.username || payload.name, 24);
-      if (pName) {
-        player.pseudo = pName;
-        player.username = pName;
-      }
-    }
+    if (payload.skinPath) player.skinPath = cleanText(payload.skinPath, 160);
     const cleanedBusInfo = cleanBusInfo(payload.busInfo);
     if (cleanedBusInfo) player.busInfo = cleanedBusInfo;
 
@@ -1453,48 +1279,32 @@ io.on('connection', (socket) => {
     player.isTalking = isTalking;
 
     const transform = {
-      position: { x: posX, y: posY, z: posZ },
-      rotation: { x: rotX, y: rotY, z: rotZ, w: rotW },
+      position: { x: Number(position.x) || 0, y: Number(position.y) || 0, z: Number(position.z) || 0 },
+      rotation: { x: Number(rotation.x) || 0, y: Number(rotation.y) || 0, z: Number(rotation.z) || 0, w: Number(rotation.w) || 1 },
       controls: { steerInput, throttle, brake: brakeCtrl, handbrake },
       steerInput, throttle, brake: brakeCtrl, handbrake,
       ts: now,
     };
     player.transform = transform;
 
-    const outgoingBusInfo = cleanedBusInfo || player.busInfo;
-    const updatePacket = {
-      ...(typeof payload === 'object' ? payload : {}),
+    socket.to(room.id).volatile.emit('vehicleUpdate', {
       roomId: room.id,
-      id: socket.id,
       socketId: socket.id,
       userId: player.userId,
       username: player.username,
       pseudo: player.pseudo,
-      name: player.pseudo,
       vehicleId: player.vehicleId,
       skinId: player.skinId,
       skinPath: player.skinPath,
-      skinTex: player.skinPath || player.skinId,
-      skin: player.skinPath,
-      skinName: player.skinPath,
-      ...(outgoingBusInfo ? { busInfo: outgoingBusInfo } : {}),
-      x: posX, y: posY, z: posZ,
-      rotX, rotY, rotZ, rotW,
+      ...(cleanedBusInfo ? { busInfo: cleanedBusInfo } : {}),
       position: transform.position,
       rotation: transform.rotation,
       controls: transform.controls,
       steerInput, throttle, brake: brakeCtrl, handbrake,
-      headlight, headLight: headlight, lights: headlight, luzes: headlight,
-      turnLeft, turn_left: turnLeft, setaEsquerda: turnLeft, indicatorLeft: turnLeft,
-      turnRight, turn_right: turnRight, setaDireita: turnRight, indicatorRight: turnRight,
-      hazard, hazards: hazard, piscaAlerta: hazard, hazardLight: hazard,
-      brake, brakeLight: brake, stopLight: brake, freio: brake,
-      reverse, reverseLight: reverse, marchaRe: reverse, reversing: reverse,
+      headlight, turnLeft, turnRight, hazard, brake, reverse,
       showNameTag, showVoiceIcon, isTalking,
       transform,
-    };
-
-    socket.to(room.id).emit('vehicleUpdate', updatePacket);
+    });
   });
 
   socket.on('disconnect', (reason) => {
@@ -1505,28 +1315,6 @@ io.on('connection', (socket) => {
     removeFromRoom(socket);
   });
 });
-
-// Balayage des connexions fantômes : un joueur dont le socket n'existe plus est retiré du salon.
-setInterval(() => {
-  let changed = false;
-  for (const room of Array.from(rooms.values())) {
-    for (const sid of Array.from(room.players.keys())) {
-      if (io.sockets.sockets.has(sid)) continue;
-      const ghost = room.players.get(sid);
-      room.players.delete(sid);
-      io.to(room.id).emit('playerLeft', { socketId: sid, userId: ghost?.userId, username: ghost?.username });
-      changed = true;
-    }
-    if (room.players.size === 0) { rooms.delete(room.id); continue; }
-    if (!room.players.has(room.hostSocketId || room.hostId)) {
-      const nextHost = Array.from(room.players.values())[0];
-      room.hostId = room.hostSocketId = nextHost.socketId;
-      io.to(room.id).emit('roomHostChanged', { newHostSocketId: nextHost.socketId, newHostPseudo: nextHost.pseudo });
-    }
-    emitMembers(room);
-  }
-  if (changed) io.emit('roomList', publicRoomList());
-}, 15000).unref();
 
 // ------------------------------------------------------------------
 // Démarrage

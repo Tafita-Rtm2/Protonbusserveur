@@ -1,6 +1,5 @@
 node_modules/
 users.json
-keys.json
 *.log
 .env
 .env.*
