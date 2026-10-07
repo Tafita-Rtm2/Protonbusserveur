@@ -1,7 +1,7 @@
 {
   "name": "proton-bus-multiplayer-server",
   "version": "2.0.0",
-  "description": "Serveur multijoueur temps réel (rooms + auth + sync véhicule) pour Proton Bus Simulator, déployable sur Hugging Face Spaces via Docker.",
+  "description": "Serveur multijoueur temps réel (rooms + auth + ync véhicule) pour Proton Bus Simulator, déployable sur Hugging Face Spaces via Docker.",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
