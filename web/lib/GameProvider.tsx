@@ -24,6 +24,7 @@ type Ctx = {
   chat: ChatMsg[];
   isHost: boolean;
   toasts: Toast[];
+  loginWithName: (name: string) => Promise<{ error?: string }>;
   loginWithKey: (key: string) => Promise<{ error?: string; code?: string }>;
   loginAdmin: (code: string) => Promise<{ error?: string; locked?: boolean; remainingMs?: number; attemptsRemaining?: number }>;
   logout: () => void;
@@ -179,6 +180,17 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
   }, [token, user, toast, resetRoom]);
 
   // --- Actions -----------------------------------------------------------------
+  const loginWithName = useCallback(async (nameStr: string) => {
+    const res = await api.loginName(nameStr);
+    if (res.error || !res.token || !res.user) {
+      return { error: res.error || 'Erreur lors de la connexion.' };
+    }
+    localStorage.setItem(TOKEN_KEY, res.token);
+    setToken(res.token);
+    setUser(res.user);
+    return {};
+  }, []);
+
   const loginWithKey = useCallback(async (keyStr: string) => {
     const res = await api.loginKey(keyStr);
     if (res.error || !res.token || !res.user) {
@@ -252,9 +264,9 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
   const value = useMemo<Ctx>(() => ({
     booting, user, token, connected, socket, rooms, room: roomInfo, roomId, members, bans, chat,
     isHost: !!socket?.id && hostId === socket.id, toasts,
-    loginWithKey, loginAdmin, logout, refreshRooms, createRoom, joinRoom, leaveRoom, kick, ban, unban, closeRoom, sendChat, dismissToast, toast,
+    loginWithName, loginWithKey, loginAdmin, logout, refreshRooms, createRoom, joinRoom, leaveRoom, kick, ban, unban, closeRoom, sendChat, dismissToast, toast,
   }), [booting, user, token, connected, socket, rooms, roomInfo, roomId, members, bans, chat, hostId, toasts,
-    loginWithKey, loginAdmin, logout, refreshRooms, createRoom, joinRoom, leaveRoom, kick, ban, unban, closeRoom, sendChat, dismissToast, toast]);
+    loginWithName, loginWithKey, loginAdmin, logout, refreshRooms, createRoom, joinRoom, leaveRoom, kick, ban, unban, closeRoom, sendChat, dismissToast, toast]);
 
   return <GameCtx.Provider value={value}>{children}</GameCtx.Provider>;
 }

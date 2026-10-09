@@ -3,7 +3,7 @@ import { NextRequest, NextResponse } from 'next/server';
 export const dynamic = 'force-dynamic';
 
 function isAllowedRoute(target: string): boolean {
-  if (target === 'login-key' || target === 'me') return true;
+  if (target === 'login-key' || target === 'login-name' || target === 'me') return true;
   if (target === 'admin/login' || target === 'admin/keys/generate' || target === 'admin/keys' || target === 'admin/stats') return true;
   if (target.startsWith('admin/keys/')) return true;
   return false;

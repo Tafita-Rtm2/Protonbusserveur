@@ -1,29 +1,29 @@
 'use client';
 import { useState } from 'react';
-import { ArrowRight, KeyRound, Loader2, Mic, ShieldAlert, Users } from 'lucide-react';
+import { ArrowRight, User as UserIcon, Loader2, Mic, ShieldAlert, Users, Sparkles } from 'lucide-react';
 import { useGame } from '@/lib/GameProvider';
 import { Logo } from './Logo';
 
 const FEATURES = [
-  { icon: KeyRound, title: 'Clé d\'Accès Unique', text: 'Entrez votre clé fournie par l\'administrateur pour rejoindre le serveur.' },
+  { icon: Sparkles, title: 'Accès Libre & Gratuit', text: 'Rejoignez directement avec votre nom/pseudo sans aucune clé requise.' },
   { icon: Users, title: 'Salons Multijoueur', text: 'Créez ou rejoignez des convois multijoueurs en temps réel.' },
   { icon: Mic, title: 'Vocal P2P Intégré', text: 'Discutez en direct de haute qualité avec les autres chauffeurs.' },
 ];
 
 export function AuthScreen() {
-  const { loginWithKey } = useGame();
-  const [accessKey, setAccessKey] = useState('');
+  const { loginWithName } = useGame();
+  const [playerName, setPlayerName] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  async function handleKeySubmit(e: React.FormEvent) {
+  async function handleNameSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
-    const key = accessKey.trim();
-    if (!key) return setError('Veuillez saisir votre clé d\'accès.');
+    const name = playerName.trim();
+    if (!name) return setError('Veuillez saisir votre nom ou pseudo.');
 
     setBusy(true);
-    const res = await loginWithKey(key);
+    const res = await loginWithName(name);
     setBusy(false);
 
     if (res.error) {
@@ -43,7 +43,7 @@ export function AuthScreen() {
           </span>
         </h1>
         <p className="mt-5 max-w-md text-lg text-slate-400">
-          Entrez votre clé d'accès unique pour vous connecter au serveur multijoueur Proton Bus Simulator.
+          Entrez votre nom ou pseudo pour vous connecter directement au serveur multijoueur Proton Bus Simulator.
         </p>
 
         <ul className="mt-10 space-y-4">
@@ -61,28 +61,28 @@ export function AuthScreen() {
         </ul>
       </section>
 
-      {/* Formulaire Clé Joueur */}
+      {/* Formulaire Pseudo Joueur */}
       <section className="mx-auto w-full max-w-md">
         <div className="mb-8 lg:hidden"><Logo size={48} withText /></div>
 
         <div className="glass-strong p-7 shadow-2xl sm:p-8 rounded-2xl border border-white/10">
-          <h2 className="text-2xl font-bold text-white">Connexion par Clé 🚌</h2>
+          <h2 className="text-2xl font-bold text-white">Connexion Gratuit 🚌</h2>
           <p className="mb-6 mt-1 text-sm text-slate-400">
-            Saisissez la clé d'accès unique fournie par votre administrateur.
+            Entrez votre nom ou pseudo pour rejoindre le serveur gratuitement.
           </p>
 
-          <form onSubmit={handleKeySubmit} className="space-y-4">
+          <form onSubmit={handleNameSubmit} className="space-y-4">
             <div>
-              <label className="label" htmlFor="k">Clé d'Accès Joueur</label>
+              <label className="label" htmlFor="p">Votre Nom / Pseudo</label>
               <div className="relative">
-                <KeyRound size={18} className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-500" />
+                <UserIcon size={18} className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-500" />
                 <input
-                  id="k"
-                  className="input pl-11 font-mono uppercase tracking-wider text-amber-300 font-bold"
-                  placeholder="KEY-XXXX-XXXX"
-                  value={accessKey}
-                  onChange={(e) => setAccessKey(e.target.value.toUpperCase())}
-                  maxLength={60}
+                  id="p"
+                  className="input pl-11 font-semibold text-amber-300"
+                  placeholder="Ex: Chauffeur_Tana"
+                  value={playerName}
+                  onChange={(e) => setPlayerName(e.target.value)}
+                  maxLength={20}
                   autoFocus
                   required
                 />
@@ -96,15 +96,15 @@ export function AuthScreen() {
               </div>
             )}
 
-            <button className="btn-primary w-full py-3.5 text-base" disabled={busy || !accessKey.trim()}>
+            <button className="btn-primary w-full py-3.5 text-base" disabled={busy || !playerName.trim()}>
               {busy ? <Loader2 size={18} className="animate-spin" /> : <ArrowRight size={18} />}
-              {busy ? 'Vérification…' : 'Accéder au Serveur'}
+              {busy ? 'Connexion…' : 'Accéder au Serveur'}
             </button>
           </form>
         </div>
 
         <p className="mt-5 text-center text-xs text-slate-500">
-          Clé unique restreinte à un seul appareil actif à la fois.
+          Accès libre sans clé d'accès. Des chiffres uniques seront automatiquement ajoutés à la fin de votre pseudo.
         </p>
       </section>
     </main>
