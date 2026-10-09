@@ -398,6 +398,46 @@ app.use('/api', requireProxy);
 // REST : Authentification Clé Joueur & Administration
 // ------------------------------------------------------------------
 
+// 0. Authentification Joueur par Nom (Gratuit / Sans Clé)
+app.post('/api/login-name', requireProxy, async (req, res) => {
+  try {
+    const rawName = req.body?.name || req.body?.pseudo || req.body?.username;
+    const cleanName = cleanText(rawName, 20);
+
+    if (!cleanName) {
+      return res.status(400).json({ error: 'Veuillez saisir votre nom ou pseudo.' });
+    }
+
+    const randomSuffix = Math.floor(1000 + Math.random() * 9000);
+    const finalName = `${cleanName}_${randomSuffix}`;
+    const userId = genId('user');
+
+    const token = jwt.sign(
+      {
+        id: userId,
+        username: finalName,
+        pseudo: finalName,
+        role: 'player',
+      },
+      JWT_SECRET,
+      { expiresIn: JWT_EXPIRES_IN }
+    );
+
+    return res.json({
+      message: 'Connexion réussie.',
+      token,
+      user: {
+        id: userId,
+        username: finalName,
+        pseudo: finalName,
+      },
+    });
+  } catch (err) {
+    console.error('[login-name] erreur:', err);
+    return res.status(500).json({ error: 'Erreur serveur.' });
+  }
+});
+
 // 1. Authentification Joueur par Clé
 app.post('/api/login-key', requireProxy, async (req, res) => {
   try {
@@ -602,6 +642,16 @@ app.get('/api/me', requireProxy, playerAuthMiddleware, async (req, res) => {
     return res.json({ user: { username: 'Administrateur', role: 'admin' } });
   }
 
+  if (req.user?.username && !req.user?.keyCode) {
+    return res.json({
+      user: {
+        id: req.user.id || genId('user'),
+        username: req.user.username,
+        pseudo: req.user.pseudo || req.user.username,
+      },
+    });
+  }
+
   const keyCode = req.user?.keyCode;
   if (!keyCode) return res.status(401).json({ error: 'Session invalide.' });
 
@@ -687,6 +737,12 @@ io.use(async (socket, next) => {
           keyCode: keyData.keyCode,
         };
         socket.data.keyCode = keyData.keyCode;
+      } else if (decoded && decoded.username) {
+        socket.user = {
+          id: decoded.id || genId('user'),
+          username: decoded.username,
+          pseudo: decoded.pseudo || decoded.username,
+        };
       } else if (decoded && decoded.role === 'admin') {
         socket.user = { id: 'admin', username: 'Administrateur', role: 'admin' };
       }

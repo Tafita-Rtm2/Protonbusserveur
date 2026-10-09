@@ -22,6 +22,12 @@ async function request<T = any>(path: string, options: RequestInit = {}): Promis
 }
 
 export const api = {
+  loginName: (name: string) =>
+    request<{ token: string; user: User }>('login-name', {
+      method: 'POST',
+      body: JSON.stringify({ name }),
+    }),
+
   loginKey: (key: string) =>
     request<{ token: string; user: User }>('login-key', {
       method: 'POST',
